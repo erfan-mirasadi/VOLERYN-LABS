@@ -28,6 +28,7 @@ export type EngineStats = {
   taaMs: number;
   compositeMs: number;
   stepsPerSecond: number;
+  residual: number;
   grid: readonly number[];
   adapterName: string;
   hasTimestamps: boolean;
@@ -75,6 +76,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   let stepsSince = 0;
   let stepCount = 0;
   let stepsPerSecond = 0;
+  let residual = 0;
   let frameIndex = 0;
   let renderScale = 0.5;
   let scaleHoldUntil = 0;
@@ -151,6 +153,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       fpsFrames = 0;
       stepsSince = stepCount;
       adjustQuality(now);
+      simulation.readResidual()?.then((value) => (residual = value), () => {});
     }
     frame = requestAnimationFrame(tick);
   }
@@ -242,6 +245,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
         taaMs: times.taa ?? 0,
         compositeMs: times.composite ?? 0,
         stepsPerSecond,
+        residual,
         grid: GRID,
         adapterName,
         hasTimestamps,

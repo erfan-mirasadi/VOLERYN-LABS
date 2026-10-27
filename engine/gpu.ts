@@ -21,3 +21,14 @@ export async function requestGpu(): Promise<Gpu> {
     hasTimestamps,
   };
 }
+
+// A bind group from resources in binding order, for a pipeline with an automatic layout.
+export function bindResources(device: GPUDevice, pipeline: GPUComputePipeline, resources: (GPUBuffer | GPUTexture | GPUSampler)[]) {
+  return device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: resources.map((resource, binding) => ({
+      binding,
+      resource: resource instanceof GPUBuffer ? { buffer: resource } : resource instanceof GPUTexture ? resource.createView() : resource,
+    })),
+  });
+}

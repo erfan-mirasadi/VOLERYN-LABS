@@ -44,6 +44,7 @@ fn solidDistance(p: vec3<f32>) -> f32 {
   for (var i = 0; i < 4; i++) { d = min(d, boxDistance(p, i)); }
   return d;
 }
+fn isSolid(p: vec3<f32>) -> bool { return P.mode == 3.0 && solidDistance(p) < 0.0; }
 `;
 
 export const HEADER = PARAMS_STRUCT + /* wgsl */ `
@@ -66,31 +67,96 @@ fn noise3(p: vec3<f32>) -> f32 {
   let d = mix(hash3(i + vec3<f32>(0.0, 1.0, 1.0)), hash3(i + vec3<f32>(1.0, 1.0, 1.0)), u.x);
   return mix(mix(a, b, u.y), mix(c, d, u.y), u.z);
 }
-` + SOLIDS;
+` + SOLIDS + /* wgsl */ `
+// Velocity lives on the cell faces: texel c holds the flow through its lower x, y and z faces.
+// The side walls, the floor and solids block their faces; the top stays open.
+fn blocked(c: vec3<i32>) -> vec3<bool> {
+  let p = vec3<f32>(c);
+  let here = isSolid(p);
+  return vec3<bool>(
+    c.x == 0 || here || isSolid(p - vec3<f32>(1.0, 0.0, 0.0)),
+    c.y == 0 || here || isSolid(p - vec3<f32>(0.0, 1.0, 0.0)),
+    c.z == 0 || here || isSolid(p - vec3<f32>(0.0, 0.0, 1.0)));
+}
+`;
+
+// Reads the face-stored velocity at any point and traces where the gas there came from; needs vel and lin bound.
+const TRACE = /* wgsl */ `
+fn faceOffset(axis: i32) -> vec3<f32> { return 0.5 * vec3<f32>(f32(axis == 0), f32(axis == 1), f32(axis == 2)); }
+fn velocityAt(p: vec3<f32>) -> vec3<f32> {
+  return vec3<f32>(
+    textureSampleLevel(vel, lin, coord(p + faceOffset(0)), 0.0).x,
+    textureSampleLevel(vel, lin, coord(p + faceOffset(1)), 0.0).y,
+    textureSampleLevel(vel, lin, coord(p + faceOffset(2)), 0.0).z);
+}
+// Where the gas now at p was one step ago, by the midpoint rule; a negative dt asks where it will be.
+fn trace(p: vec3<f32>, dt: f32) -> vec3<f32> {
+  let mid = p - 0.5 * dt * velocityAt(p);
+  return p - dt * velocityAt(mid);
+}
+`;
 
 export const SHADERS = {
-  advectVelocity: /* wgsl */ `
-@group(0) @binding(1) var src: texture_3d<f32>;
-@group(0) @binding(2) var dst: texture_storage_3d<rgba16float, write>;
-@group(0) @binding(3) var lin: sampler;
+  predictVelocity: /* wgsl */ `
+@group(0) @binding(1) var vel: texture_3d<f32>;
+@group(0) @binding(2) var src: texture_3d<f32>;
+@group(0) @binding(3) var dst: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(4) var lin: sampler;
+${TRACE}
+fn carried(axis: i32, p: vec3<f32>) -> f32 {
+  let offset = faceOffset(axis);
+  let value = textureSampleLevel(src, lin, coord(trace(p - offset, P.dt) + offset), 0.0);
+  return value[axis];
+}
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
   if (!inside(c)) { return; }
-  let back = vec3<f32>(c) - P.dt * textureLoad(src, c, 0).xyz;
-  textureStore(dst, c, vec4<f32>(textureSampleLevel(src, lin, coord(back), 0.0).xyz, 0.0));
+  let p = vec3<f32>(c);
+  textureStore(dst, c, vec4<f32>(carried(0, p), carried(1, p), carried(2, p), 0.0));
+}`,
+  correctVelocity: /* wgsl */ `
+@group(0) @binding(1) var vel: texture_3d<f32>;
+@group(0) @binding(2) var old: texture_3d<f32>;
+@group(0) @binding(3) var hat: texture_3d<f32>;
+@group(0) @binding(4) var dst: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(5) var lin: sampler;
+${TRACE}
+fn corrected(axis: i32, c: vec3<i32>) -> f32 {
+  let offset = faceOffset(axis);
+  let face = vec3<f32>(c) - offset;
+  let ahead = textureSampleLevel(hat, lin, coord(trace(face, -P.dt) + offset), 0.0);
+  let predicted = textureLoad(hat, c, 0);
+  let was = textureLoad(old, c, 0);
+  let q = predicted[axis] + 0.5 * (was[axis] - ahead[axis]);
+  // MacCormack can overshoot, so clamp to the stored values the back-traced sample was blended from.
+  let base = vec3<i32>(floor(trace(face, P.dt) + offset));
+  var lo = 1e9;
+  var hi = -1e9;
+  for (var k = 0; k < 8; k++) {
+    let s = textureLoad(old, clampc(base + vec3<i32>(k & 1, (k >> 1u) & 1, (k >> 2u) & 1)), 0);
+    lo = min(lo, s[axis]);
+    hi = max(hi, s[axis]);
+  }
+  return clamp(q, lo, hi);
+}
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let c = vec3<i32>(id);
+  if (!inside(c)) { return; }
+  textureStore(dst, c, vec4<f32>(corrected(0, c), corrected(1, c), corrected(2, c), 0.0));
 }`,
   predict: /* wgsl */ `
 @group(0) @binding(1) var vel: texture_3d<f32>;
 @group(0) @binding(2) var src: texture_3d<f32>;
 @group(0) @binding(3) var dst: texture_storage_3d<rgba16float, write>;
 @group(0) @binding(4) var lin: sampler;
+${TRACE}
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
   if (!inside(c)) { return; }
-  let back = vec3<f32>(c) - P.dt * textureLoad(vel, c, 0).xyz;
-  textureStore(dst, c, textureSampleLevel(src, lin, coord(back), 0.0));
+  textureStore(dst, c, textureSampleLevel(src, lin, coord(trace(vec3<f32>(c), P.dt)), 0.0));
 }`,
   correct: /* wgsl */ `
 @group(0) @binding(1) var vel: texture_3d<f32>;
@@ -98,14 +164,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(3) var hat: texture_3d<f32>;
 @group(0) @binding(4) var dst: texture_storage_3d<rgba16float, write>;
 @group(0) @binding(5) var lin: sampler;
+${TRACE}
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
   if (!inside(c)) { return; }
   let p = vec3<f32>(c);
-  let v = textureLoad(vel, c, 0).xyz;
-  let back = p - P.dt * v;
-  let ahead = textureSampleLevel(hat, lin, coord(p + P.dt * v), 0.0);
+  let back = trace(p, P.dt);
+  let ahead = textureSampleLevel(hat, lin, coord(trace(p, -P.dt)), 0.0);
   var q = textureLoad(hat, c, 0) + 0.5 * (textureLoad(old, c, 0) - ahead);
   // MacCormack can overshoot, so clamp to the cells the back-traced sample was blended from.
   let base = vec3<i32>(floor(back));
@@ -157,7 +223,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   curl: /* wgsl */ `
 @group(0) @binding(1) var vel: texture_3d<f32>;
 @group(0) @binding(2) var dst: texture_storage_3d<rgba16float, write>;
-fn at(c: vec3<i32>) -> vec3<f32> { return textureLoad(vel, clampc(c), 0).xyz; }
+// The velocity at a cell's centre: the mean of each pair of opposite faces.
+fn at(c: vec3<i32>) -> vec3<f32> {
+  let lower = textureLoad(vel, clampc(c), 0).xyz;
+  let upper = vec3<f32>(textureLoad(vel, clampc(c + X), 0).x, textureLoad(vel, clampc(c + Y), 0).y, textureLoad(vel, clampc(c + Z), 0).z);
+  return 0.5 * (lower + upper);
+}
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
@@ -172,19 +243,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   textureStore(dst, c, vec4<f32>(w, length(w)));
 }`,
   forces: /* wgsl */ `
-@group(0) @binding(1) var vel: texture_3d<f32>;
-@group(0) @binding(2) var sca: texture_3d<f32>;
-@group(0) @binding(3) var curl: texture_3d<f32>;
-@group(0) @binding(4) var dst: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(1) var sca: texture_3d<f32>;
+@group(0) @binding(2) var curl: texture_3d<f32>;
+@group(0) @binding(3) var dst: texture_storage_3d<rgba16float, write>;
 fn spin(c: vec3<i32>) -> f32 { return textureLoad(curl, clampc(c), 0).w; }
+// The velocity each cell gains this step, taken at its centre; applyForces spreads it onto the faces.
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
   if (!inside(c)) { return; }
   let p = vec3<f32>(c);
   let s = textureLoad(sca, c, 0);
-  var v = textureLoad(vel, c, 0).xyz;
-  v.y += P.dt * (P.buoyancy * s.y - 4.0 * s.x);
+  var v = vec3<f32>(0.0, P.dt * (P.buoyancy * s.y - 4.0 * s.x), 0.0);
   // Vorticity confinement: push along N x omega to give back the swirls the coarse grid smooths away.
   let grad = 0.5 * vec3<f32>(spin(c + X) - spin(c - X), spin(c + Y) - spin(c - Y), spin(c + Z) - spin(c - Z));
   let len = length(grad);
@@ -204,57 +274,59 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (P.mode == 2.0 && P.emit > 0.0 && d < 1.8) {
     v += P.dt * P.emit * 1.5 * fromEmitter / max(length(fromEmitter), 0.5);
   }
-  v *= exp(-P.damping * P.dt) * (1.0 - 0.06 * smoothstep(0.8, 1.0, p.y / P.size.y));
   textureStore(dst, c, vec4<f32>(v, 0.0));
+}`,
+  applyForces: /* wgsl */ `
+@group(0) @binding(1) var vel: texture_3d<f32>;
+@group(0) @binding(2) var force: texture_3d<f32>;
+@group(0) @binding(3) var dst: texture_storage_3d<rgba16float, write>;
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let c = vec3<i32>(id);
+  if (!inside(c)) { return; }
+  let p = vec3<f32>(c);
+  // Each face takes the mean of the two cells it separates.
+  let here = textureLoad(force, c, 0).xyz;
+  let below = vec3<f32>(textureLoad(force, clampc(c - X), 0).x, textureLoad(force, clampc(c - Y), 0).y, textureLoad(force, clampc(c - Z), 0).z);
+  var v = textureLoad(vel, c, 0).xyz + 0.5 * (here + below);
+  v *= exp(-P.damping * P.dt) * (1.0 - 0.06 * smoothstep(0.8, 1.0, p.y / P.size.y));
+  textureStore(dst, c, vec4<f32>(select(v, vec3<f32>(0.0), blocked(c)), 0.0));
 }`,
   divergence: /* wgsl */ `
 @group(0) @binding(1) var vel: texture_3d<f32>;
 @group(0) @binding(2) var dst: texture_storage_3d<r32float, write>;
 @group(0) @binding(3) var sca: texture_3d<f32>;
-fn at(c: vec3<i32>) -> vec3<f32> { return textureLoad(vel, clampc(c), 0).xyz; }
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
   if (!inside(c)) { return; }
-  let div = 0.5 * ((at(c + X).x - at(c - X).x) + (at(c + Y).y - at(c - Y).y) + (at(c + Z).z - at(c - Z).z));
+  if (isSolid(vec3<f32>(c))) {
+    textureStore(dst, c, vec4<f32>(0.0));
+    return;
+  }
+  let n = dims();
+  let v = textureLoad(vel, c, 0).xyz;
+  // The far faces: the side walls block, the open top repeats the face below.
+  let right = select(textureLoad(vel, clampc(c + X), 0).x, 0.0, c.x == n.x - 1);
+  let above = select(textureLoad(vel, clampc(c + Y), 0).y, v.y, c.y == n.y - 1);
+  let front = select(textureLoad(vel, clampc(c + Z), 0).z, 0.0, c.z == n.z - 1);
+  let div = (right - v.x) + (above - v.y) + (front - v.z);
   // Burning gas expands: the solve targets this much divergence instead of none.
   let expansion = P.expansion * textureLoad(sca, c, 0).w;
   textureStore(dst, c, vec4<f32>(div - expansion, 0.0, 0.0, 0.0));
 }`,
-  jacobi: /* wgsl */ `
-@group(0) @binding(1) var src: texture_3d<f32>;
-@group(0) @binding(2) var divergence: texture_3d<f32>;
-@group(0) @binding(3) var dst: texture_storage_3d<r32float, write>;
-fn pressure(c: vec3<i32>) -> f32 {
-  if (c.y >= dims().y) { return 0.0; }
-  return textureLoad(src, clampc(c), 0).x;
-}
-@compute @workgroup_size(4, 4, 4)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-  let c = vec3<i32>(id);
-  if (!inside(c)) { return; }
-  let sum = pressure(c - X) + pressure(c + X) + pressure(c - Y) + pressure(c + Y) + pressure(c - Z) + pressure(c + Z);
-  textureStore(dst, c, vec4<f32>((sum - textureLoad(divergence, c, 0).x) / 6.0, 0.0, 0.0, 0.0));
-}`,
   project: /* wgsl */ `
 @group(0) @binding(1) var vel: texture_3d<f32>;
-@group(0) @binding(2) var src: texture_3d<f32>;
+@group(0) @binding(2) var pressure: texture_3d<f32>;
 @group(0) @binding(3) var dst: texture_storage_3d<rgba16float, write>;
-fn pressure(c: vec3<i32>) -> f32 {
-  if (c.y >= dims().y) { return 0.0; }
-  return textureLoad(src, clampc(c), 0).x;
-}
+fn at(c: vec3<i32>) -> f32 { return textureLoad(pressure, clampc(c), 0).x; }
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
   if (!inside(c)) { return; }
-  var v = textureLoad(vel, c, 0).xyz - 0.5 * vec3<f32>(pressure(c + X) - pressure(c - X), pressure(c + Y) - pressure(c - Y), pressure(c + Z) - pressure(c - Z));
-  let n = dims();
-  if (c.x == 0 || c.x == n.x - 1) { v.x = 0.0; }
-  if (c.z == 0 || c.z == n.z - 1) { v.z = 0.0; }
-  if (c.y == 0) { v.y = max(v.y, 0.0); }
-  if (P.mode == 3.0 && solidDistance(vec3<f32>(c)) < 0.0) { v = vec3<f32>(0.0); }
-  textureStore(dst, c, vec4<f32>(v, 0.0));
+  let q = at(c);
+  let v = textureLoad(vel, c, 0).xyz - vec3<f32>(q - at(c - X), q - at(c - Y), q - at(c - Z));
+  textureStore(dst, c, vec4<f32>(select(v, vec3<f32>(0.0), blocked(c)), 0.0));
 }`,
   shadow: /* wgsl */ `
 @group(0) @binding(1) var sca: texture_3d<f32>;

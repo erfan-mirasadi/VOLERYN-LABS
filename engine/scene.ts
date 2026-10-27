@@ -6,7 +6,6 @@ export const LIGHT_GRID = GRID.map((n) => n / LIGHT_SCALE) as [number, number, n
 export const LIGHT_BLUR_PASSES = 3;
 export const FIRE_LIGHT = 3;
 export const DT = 1 / 60;
-export const JACOBI = 24;
 export const DENSITY = 14;
 export const EXPOSURE = 0.8;
 export const LIGHT = normalize([-0.45, 0.8, 0.4]);

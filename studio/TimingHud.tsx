@@ -27,6 +27,7 @@ export default function TimingHud() {
     ['taa', `${stats.taaMs.toFixed(2)} ms`],
     ['composite', `${stats.compositeMs.toFixed(2)} ms`],
     ['steps', `${stats.stepsPerSecond.toFixed(0)} /s`],
+    ['divergence', stats.residual.toExponential(1)],
     ['grid', stats.grid.join(' × ')],
   ];
 
