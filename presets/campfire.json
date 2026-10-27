@@ -1,0 +1,24 @@
+{
+  "id": "campfire",
+  "name": "Campfire",
+  "mode": "objects",
+  "buoyancy": 32,
+  "cooling": 2.6,
+  "burn": 6,
+  "heat": 1.2,
+  "smokeYield": 0.18,
+  "dissipation": 0.8,
+  "emit": 18,
+  "radius": 1,
+  "emitter": [0, -100, 0],
+  "vorticity": 7,
+  "turbulence": 140,
+  "damping": 1.2,
+  "tint": [0.33, 0.31, 0.3],
+  "glow": 0.5,
+  "objects": [
+    { "x": 24, "y": 7, "z": 32, "yaw": 0.35, "hx": 11, "hy": 3.5, "hz": 3.5 },
+    { "x": 40, "y": 7, "z": 31, "yaw": -0.55, "hx": 10, "hy": 3.5, "hz": 3.5 },
+    { "x": 32, "y": 16, "z": 32, "yaw": 0.8, "hx": 5, "hy": 5, "hz": 5 }
+  ]
+}

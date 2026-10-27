@@ -1,0 +1,44 @@
+export const GRID = [64, 96, 64] as const;
+export const SHADOW_GRID = [32, 48, 32] as const;
+export const DT = 1 / 60;
+export const JACOBI = 24;
+export const DENSITY = 14;
+export const EXPOSURE = 0.8;
+export const LIGHT = normalize([-0.45, 0.8, 0.4]);
+export const MAX_BOXES = 4;
+
+// An axis-aligned box in grid cells, turned about y; its skin gives off fuel and its body blocks the flow.
+export type Box = { x: number; y: number; z: number; yaw: number; hx: number; hy: number; hz: number };
+
+export type EmitterMode = 'fire' | 'smoke' | 'explosion' | 'objects';
+
+export type Preset = {
+  id: string;
+  name: string;
+  mode: EmitterMode;
+  buoyancy: number;
+  cooling: number;
+  burn: number;
+  heat: number;
+  smokeYield: number;
+  dissipation: number;
+  emit: number;
+  radius: number;
+  emitter: [number, number, number];
+  vorticity: number;
+  turbulence: number;
+  damping: number;
+  tint: [number, number, number];
+  glow: number;
+  objects?: Box[];
+};
+
+// Live tweaks the studio layers over a preset without changing the preset itself.
+export type Tweaks = { heat: number; vorticity: number; wind: number };
+
+export const MODE_INDEX: Record<EmitterMode, number> = { fire: 0, smoke: 1, explosion: 2, objects: 3 };
+
+function normalize(v: number[]) {
+  const length = Math.hypot(...v);
+  return v.map((x) => x / length) as [number, number, number];
+}

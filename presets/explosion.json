@@ -1,0 +1,19 @@
+{
+  "id": "explosion",
+  "name": "Explosion",
+  "mode": "explosion",
+  "buoyancy": 40,
+  "cooling": 2,
+  "burn": 6,
+  "heat": 0.35,
+  "smokeYield": 0.15,
+  "dissipation": 0.18,
+  "emit": 70,
+  "radius": 10,
+  "emitter": [32, 20, 32],
+  "vorticity": 10,
+  "turbulence": 260,
+  "damping": 0.8,
+  "tint": [0.3, 0.28, 0.27],
+  "glow": 0.45
+}

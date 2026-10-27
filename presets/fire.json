@@ -1,0 +1,19 @@
+{
+  "id": "fire",
+  "name": "Fire",
+  "mode": "fire",
+  "buoyancy": 32,
+  "cooling": 2.8,
+  "burn": 6,
+  "heat": 1.3,
+  "smokeYield": 0.12,
+  "dissipation": 0.9,
+  "emit": 30,
+  "radius": 9,
+  "emitter": [32, 6, 32],
+  "vorticity": 7,
+  "turbulence": 140,
+  "damping": 1.2,
+  "tint": [0.33, 0.31, 0.3],
+  "glow": 0.5
+}
