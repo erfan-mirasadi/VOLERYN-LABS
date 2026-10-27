@@ -1,6 +1,6 @@
-import { PARAMS_STRUCT, SOLIDS } from './simulation-shaders';
+import { BLACKBODY, PARAMS_STRUCT, SOLIDS } from './simulation-shaders';
 
-export const RENDER = /* wgsl */ `
+export const RENDER = BLACKBODY + /* wgsl */ `
 struct View {
   camPos: vec3<f32>,
   tanHalf: f32,
@@ -18,7 +18,7 @@ struct View {
   fire: f32,
   viewport: vec4<f32>,
   layer: f32,
-  pad0: f32,
+  fireLight: f32,
   pad1: f32,
   pad2: f32,
 }
@@ -28,19 +28,12 @@ struct View {
 @group(0) @binding(3) var lin: sampler;
 ` + PARAMS_STRUCT + /* wgsl */ `
 @group(0) @binding(4) var<uniform> P: Params;
+@group(0) @binding(5) var glow: texture_3d<f32>;
 ` + SOLIDS + /* wgsl */ `
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
   var corners = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
   return vec4<f32>(corners[i], 0.0, 1.0);
-}
-
-// Flame colour from temperature: an approximate blackbody curve, brighter with the fourth power of temperature.
-fn blackbody(t: f32) -> vec3<f32> {
-  let k = clamp(8.0 + 7.0 * t, 8.0, 40.0);
-  let g = clamp((99.4708 * log(k) - 161.1196) / 255.0, 0.0, 1.0);
-  let b = select(clamp((138.5177 * log(max(k - 10.0, 1.0)) - 305.0448) / 255.0, 0.0, 1.0), 0.0, k <= 19.0);
-  return pow(vec3<f32>(1.0, g, b), vec3<f32>(2.2)) * pow(k / 15.0, 4.0);
 }
 
 fn tonemap(c: vec3<f32>) -> vec3<f32> {
@@ -97,7 +90,8 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
           solidDistance(gh + vec3<f32>(0.0, 0.0, e)) - solidDistance(gh - vec3<f32>(0.0, 0.0, e))));
         let lit = max(dot(n, P.lightDir), 0.0) * textureSampleLevel(shade, lin, qh, 0.0).x + 0.18;
         let heat = textureSampleLevel(sca, lin, qh + n * 3.0 / P.size, 0.0).y;
-        solid += transmittance * (vec3<f32>(0.075, 0.06, 0.05) * lit + blackbody(heat * 0.9) * V.fire * 0.3);
+        let flameLight = textureSampleLevel(glow, lin, qh, 0.0).rgb * V.fireLight * V.fire;
+        solid += transmittance * (vec3<f32>(0.075, 0.06, 0.05) * (lit + flameLight) + blackbody(heat * 0.9) * V.fire * 0.3);
         depthSum += transmittance * hit;
         weightSum += transmittance;
         hottest = max(hottest, heat);
@@ -108,8 +102,9 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let s = textureSampleLevel(sca, lin, q, 0.0);
     let absorb = exp(-s.x * V.density * V.stepSize);
     let light = textureSampleLevel(shade, lin, q, 0.0).x;
-    fire += transmittance * blackbody(s.y) * V.fire * smoothstep(0.2, 1.0, s.y) * V.stepSize;
-    smoke += transmittance * (V.smokeTint * (0.85 * light + 0.12) + blackbody(s.y * 0.7) * 0.16 * V.fire) * (1.0 - absorb);
+    let flameLight = textureSampleLevel(glow, lin, q, 0.0).rgb * V.fireLight * V.fire;
+    fire += transmittance * emission(s.y) * V.fire * V.stepSize;
+    smoke += transmittance * (V.smokeTint * (0.85 * light + 0.12 + flameLight) + blackbody(s.y * 0.7) * 0.05 * V.fire) * (1.0 - absorb);
     depthSum += transmittance * (1.0 - absorb) * t;
     weightSum += transmittance * (1.0 - absorb);
     hottest = max(hottest, s.y);

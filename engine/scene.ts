@@ -1,5 +1,10 @@
 export const GRID = [64, 96, 64] as const;
 export const SHADOW_GRID = [32, 48, 32] as const;
+// The flame's light volume: one cell per LIGHT_SCALE simulation cells, blurred LIGHT_BLUR_PASSES times.
+export const LIGHT_SCALE = 4;
+export const LIGHT_GRID = GRID.map((n) => n / LIGHT_SCALE) as [number, number, number];
+export const LIGHT_BLUR_PASSES = 3;
+export const FIRE_LIGHT = 3;
 export const DT = 1 / 60;
 export const JACOBI = 24;
 export const DENSITY = 14;
@@ -28,6 +33,7 @@ export type Preset = {
   vorticity: number;
   turbulence: number;
   damping: number;
+  expansion: number;
   tint: [number, number, number];
   glow: number;
   objects?: Box[];

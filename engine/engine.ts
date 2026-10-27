@@ -13,7 +13,7 @@ const BURST_EVERY = 5;
 export type EngineStats = {
   fps: number;
   simulationMs: number;
-  shadowMs: number;
+  lightingMs: number;
   renderMs: number;
   stepsPerSecond: number;
   grid: readonly number[];
@@ -90,9 +90,9 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       stepCount++;
     }
     simulationPass.end();
-    const shadowPass = encoder.beginComputePass({ timestampWrites: timer.timestamps('shadow') });
-    simulation.updateShadow(shadowPass);
-    shadowPass.end();
+    const lightingPass = encoder.beginComputePass({ timestampWrites: timer.timestamps('lighting') });
+    simulation.updateLighting(lightingPass);
+    lightingPass.end();
 
     renderer.writeView(
       { eye: eye(), target, tanHalfFov: Math.tan(FOV / 2), aspect: canvas.width / canvas.height, rect: [0, 0, canvas.width, canvas.height] },
@@ -193,7 +193,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       return {
         fps,
         simulationMs: times.simulation ?? 0,
-        shadowMs: times.shadow ?? 0,
+        lightingMs: times.lighting ?? 0,
         renderMs: times.render ?? 0,
         stepsPerSecond,
         grid: GRID,

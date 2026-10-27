@@ -1,5 +1,5 @@
 import { RENDER } from './render-shaders';
-import { DENSITY, EXPOSURE, GRID, type Preset } from './scene';
+import { DENSITY, EXPOSURE, FIRE_LIGHT, GRID, type Preset } from './scene';
 import type { Volumes } from './simulation';
 
 const VIEW_FLOATS = 36;
@@ -38,6 +38,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
         { binding: 2, resource: volumes.shadow.createView() },
         { binding: 3, resource: volumes.sampler },
         { binding: 4, resource: { buffer: volumes.params } },
+        { binding: 5, resource: volumes.light.createView() },
       ],
     }),
   );
@@ -56,7 +57,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
       ...BOX_MAX, DENSITY,
       ...preset.tint, preset.glow,
       ...view.rect,
-      view.layer ?? 0, 0, 0, 0,
+      view.layer ?? 0, FIRE_LIGHT, 0, 0,
     ]);
     device.queue.writeBuffer(viewBuffer, 0, viewData);
   }

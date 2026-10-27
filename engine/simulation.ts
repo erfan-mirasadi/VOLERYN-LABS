@@ -1,11 +1,26 @@
-import { CLEAR, HEADER, SHADERS } from './simulation-shaders';
-import { type Box, DT, GRID, JACOBI, LIGHT, MAX_BOXES, MODE_INDEX, type Preset, SHADOW_GRID, type Tweaks } from './scene';
+import { CLEAR, EMISSION, HEADER, LIGHT_BLUR, SHADERS } from './simulation-shaders';
+import {
+  type Box,
+  DT,
+  GRID,
+  JACOBI,
+  LIGHT,
+  LIGHT_BLUR_PASSES,
+  LIGHT_GRID,
+  LIGHT_SCALE,
+  MAX_BOXES,
+  MODE_INDEX,
+  type Preset,
+  SHADOW_GRID,
+  type Tweaks,
+} from './scene';
 
 const PARAM_FLOATS = 60;
 
 export type Volumes = {
   scalars: [GPUTexture, GPUTexture];
   shadow: GPUTexture;
+  light: GPUTexture;
   params: GPUBuffer;
   sampler: GPUSampler;
 };
@@ -27,6 +42,7 @@ export function createSimulation(device: GPUDevice) {
   const pressure = [volume('r32float'), volume('r32float')];
   const divergence = volume('r32float');
   const shadow = volume('rgba16float', SHADOW_GRID);
+  const light = [volume('rgba16float', LIGHT_GRID), volume('rgba16float', LIGHT_GRID)];
   const sampler = device.createSampler({
     magFilter: 'linear',
     minFilter: 'linear',
@@ -44,6 +60,8 @@ export function createSimulation(device: GPUDevice) {
   >;
   const clearHalf = compute(CLEAR('rgba16float'));
   const clearFloat = compute(CLEAR('r32float'));
+  const emission = compute(EMISSION(LIGHT_SCALE));
+  const lightBlur = compute(LIGHT_BLUR);
 
   const bind = (pipeline: GPUComputePipeline, resources: (GPUBuffer | GPUTexture | GPUSampler)[]) =>
     device.createBindGroup({
@@ -60,10 +78,12 @@ export function createSimulation(device: GPUDevice) {
     correct: both((i) => both((j) => bind(pipelines.correct, [params, velocity[i], scalars[j], predicted, scalars[1 - j], sampler]))),
     curl: both((i) => bind(pipelines.curl, [params, velocity[i], curl])),
     forces: both((i) => both((j) => bind(pipelines.forces, [params, velocity[i], scalars[j], curl, velocity[1 - i]]))),
-    divergence: both((i) => bind(pipelines.divergence, [params, velocity[i], divergence])),
+    divergence: both((i) => both((j) => bind(pipelines.divergence, [params, velocity[i], divergence, scalars[j]]))),
     jacobi: both((k) => bind(pipelines.jacobi, [params, pressure[k], divergence, pressure[1 - k]])),
     project: both((i) => both((k) => bind(pipelines.project, [params, velocity[i], pressure[k], velocity[1 - i]]))),
     shadow: both((j) => bind(pipelines.shadow, [params, scalars[j], sampler, shadow])),
+    emission: both((j) => bind(emission, [scalars[j], light[0]])),
+    lightBlur: both((k) => bind(lightBlur, [light[k], light[1 - k]])),
     clear: [
       ...[...velocity, ...scalars, predicted, curl].map((t) => [clearHalf, bind(clearHalf, [t])] as const),
       ...[...pressure, divergence].map((t) => [clearFloat, bind(clearFloat, [t])] as const),
@@ -72,6 +92,7 @@ export function createSimulation(device: GPUDevice) {
 
   const workgroups = GRID.map((n) => Math.ceil(n / 4)) as [number, number, number];
   const shadowWorkgroups = SHADOW_GRID.map((n) => Math.ceil(n / 4)) as [number, number, number];
+  const lightWorkgroups = LIGHT_GRID.map((n) => Math.ceil(n / 4)) as [number, number, number];
   const run = (pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, group: GPUBindGroup, size = workgroups) => {
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, group);
@@ -96,7 +117,7 @@ export function createSimulation(device: GPUDevice) {
       ...preset.emitter, preset.radius,
       emitting ? preset.emit : 0, preset.smokeYield, preset.heat * tweaks.heat, preset.dissipation,
       ...LIGHT, MODE_INDEX[preset.mode],
-      preset.turbulence, preset.damping, 0, 0,
+      preset.turbulence, preset.damping, preset.expansion, 0,
       ...boxData,
     ]);
     device.queue.writeBuffer(params, 0, paramData);
@@ -110,7 +131,7 @@ export function createSimulation(device: GPUDevice) {
     sc = 1 - sc;
     run(pass, pipelines.curl, groups.curl[va]);
     run(pass, pipelines.forces, groups.forces[va][sc]);
-    run(pass, pipelines.divergence, groups.divergence[vc]);
+    run(pass, pipelines.divergence, groups.divergence[vc][sc]);
     for (let i = 0; i < JACOBI; i++) {
       run(pass, pipelines.jacobi, groups.jacobi[pc]);
       pc = 1 - pc;
@@ -119,8 +140,11 @@ export function createSimulation(device: GPUDevice) {
     vc = va;
   }
 
-  function updateShadow(pass: GPUComputePassEncoder) {
+  // The shadow volume and the flame's light volume, both read by the render; the blur ping-pongs and ends in light[0].
+  function updateLighting(pass: GPUComputePassEncoder) {
     run(pass, pipelines.shadow, groups.shadow[sc], shadowWorkgroups);
+    run(pass, emission, groups.emission[sc], lightWorkgroups);
+    for (let i = 0; i < LIGHT_BLUR_PASSES * 2; i++) run(pass, lightBlur, groups.lightBlur[i % 2], lightWorkgroups);
   }
 
   function clear() {
@@ -132,10 +156,10 @@ export function createSimulation(device: GPUDevice) {
   }
 
   function dispose() {
-    for (const texture of [...velocity, ...scalars, predicted, curl, ...pressure, divergence, shadow]) texture.destroy();
+    for (const texture of [...velocity, ...scalars, predicted, curl, ...pressure, divergence, shadow, ...light]) texture.destroy();
     params.destroy();
   }
 
-  const volumes: Volumes = { scalars, shadow, params, sampler };
-  return { volumes, writeParams, step, updateShadow, clear, dispose, get scalarIndex() { return sc; } };
+  const volumes: Volumes = { scalars, shadow, light: light[0], params, sampler };
+  return { volumes, writeParams, step, updateLighting, clear, dispose, get scalarIndex() { return sc; } };
 }

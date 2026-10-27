@@ -17,12 +17,12 @@ export default function TimingHud() {
   }, [engine]);
 
   if (!stats) return null;
-  const gpuMs = stats.simulationMs + stats.shadowMs + stats.renderMs;
+  const gpuMs = stats.simulationMs + stats.lightingMs + stats.renderMs;
   const rows: [string, string][] = [
     ['fps', stats.fps.toFixed(0)],
     ['gpu', stats.hasTimestamps ? `${gpuMs.toFixed(2)} ms` : 'no timestamps'],
     ['simulation', `${stats.simulationMs.toFixed(2)} ms`],
-    ['shadow', `${stats.shadowMs.toFixed(2)} ms`],
+    ['lighting', `${stats.lightingMs.toFixed(2)} ms`],
     ['render', `${stats.renderMs.toFixed(2)} ms`],
     ['steps', `${stats.stepsPerSecond.toFixed(0)} /s`],
     ['grid', stats.grid.join(' × ')],

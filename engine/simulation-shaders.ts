@@ -20,7 +20,7 @@ struct Params {
   mode: f32,
   turbulence: f32,
   damping: f32,
-  pad0: f32,
+  expansion: f32,
   pad1: f32,
   objects: array<vec4<f32>, 8>,
 }
@@ -120,6 +120,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   // Fuel burns into heat and soot; heat and soot then fade.
   let burned = q.z * (1.0 - exp(-P.burn * P.dt));
   q.z -= burned;
+  // The burn rate rides in w so the pressure solve can let burning gas expand.
+  q.w = burned / P.dt;
   q.y = (q.y + burned * P.heat) * exp(-P.cooling * P.dt);
   q.x = (q.x + burned * P.smokeYield) * exp(-P.dissipation * P.dt);
   let flicker = noise3(p * 0.3 + vec3<f32>(0.0, -P.time * 4.0, P.time * 1.3));
@@ -208,13 +210,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   divergence: /* wgsl */ `
 @group(0) @binding(1) var vel: texture_3d<f32>;
 @group(0) @binding(2) var dst: texture_storage_3d<r32float, write>;
+@group(0) @binding(3) var sca: texture_3d<f32>;
 fn at(c: vec3<i32>) -> vec3<f32> { return textureLoad(vel, clampc(c), 0).xyz; }
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
   if (!inside(c)) { return; }
   let div = 0.5 * ((at(c + X).x - at(c - X).x) + (at(c + Y).y - at(c - Y).y) + (at(c + Z).z - at(c - Z).z));
-  textureStore(dst, c, vec4<f32>(div, 0.0, 0.0, 0.0));
+  // Burning gas expands: the solve targets this much divergence instead of none.
+  let expansion = P.expansion * textureLoad(sca, c, 0).w;
+  textureStore(dst, c, vec4<f32>(div - expansion, 0.0, 0.0, 0.0));
 }`,
   jacobi: /* wgsl */ `
 @group(0) @binding(1) var src: texture_3d<f32>;
@@ -271,6 +276,60 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   textureStore(dst, vec3<i32>(id), vec4<f32>(exp(-depth * 0.03 * ${DENSITY.toFixed(1)}), 0.0, 0.0, 1.0));
 }`,
 };
+
+// Flame colour from temperature: an approximate blackbody curve, brighter with the fourth power of temperature.
+export const BLACKBODY = /* wgsl */ `
+fn blackbody(t: f32) -> vec3<f32> {
+  let k = clamp(8.0 + 7.0 * t, 8.0, 40.0);
+  let g = clamp((99.4708 * log(k) - 161.1196) / 255.0, 0.0, 1.0);
+  let b = select(clamp((138.5177 * log(max(k - 10.0, 1.0)) - 305.0448) / 255.0, 0.0, 1.0), 0.0, k <= 19.0);
+  return pow(vec3<f32>(1.0, g, b), vec3<f32>(2.2)) * pow(k / 15.0, 4.0);
+}
+fn emission(t: f32) -> vec3<f32> { return blackbody(t) * smoothstep(0.2, 1.0, t); }
+`;
+
+// The flame's light, averaged over each block of fine cells into the coarse light volume.
+export const EMISSION = (scale: number) => BLACKBODY + /* wgsl */ `
+@group(0) @binding(0) var sca: texture_3d<f32>;
+@group(0) @binding(1) var dst: texture_storage_3d<rgba16float, write>;
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (any(id >= textureDimensions(dst))) { return; }
+  let base = vec3<i32>(id) * ${scale};
+  var sum = vec3<f32>(0.0);
+  for (var z = 0; z < ${scale}; z++) {
+    for (var y = 0; y < ${scale}; y++) {
+      for (var x = 0; x < ${scale}; x++) {
+        sum += emission(textureLoad(sca, base + vec3<i32>(x, y, z), 0).y);
+      }
+    }
+  }
+  textureStore(dst, vec3<i32>(id), vec4<f32>(sum / ${(scale * scale * scale).toFixed(1)}, 1.0));
+}`;
+
+// Spreads the light volume one cell outwards; run a few times it stands in for light scattering through the smoke.
+export const LIGHT_BLUR = /* wgsl */ `
+@group(0) @binding(0) var src: texture_3d<f32>;
+@group(0) @binding(1) var dst: texture_storage_3d<rgba16float, write>;
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let n = vec3<i32>(textureDimensions(dst));
+  let c = vec3<i32>(id);
+  if (any(c >= n)) { return; }
+  var sum = vec3<f32>(0.0);
+  var weight = 0.0;
+  for (var z = -1; z <= 1; z++) {
+    for (var y = -1; y <= 1; y++) {
+      for (var x = -1; x <= 1; x++) {
+        let w = 1.0 / (1.0 + f32(x * x + y * y + z * z));
+        let p = c + vec3<i32>(x, y, z);
+        if (all(p >= vec3<i32>(0)) && all(p < n)) { sum += textureLoad(src, p, 0).rgb * w; }
+        weight += w;
+      }
+    }
+  }
+  textureStore(dst, c, vec4<f32>(sum / weight, 1.0));
+}`;
 
 export const CLEAR = (format: 'rgba16float' | 'r32float') => /* wgsl */ `
 @group(0) @binding(0) var dst: texture_storage_3d<${format}, write>;

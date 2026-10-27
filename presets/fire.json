@@ -14,6 +14,7 @@
   "vorticity": 7,
   "turbulence": 140,
   "damping": 1.2,
+  "expansion": 0.02,
   "tint": [0.33, 0.31, 0.3],
   "glow": 0.5
 }
