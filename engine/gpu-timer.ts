@@ -40,6 +40,7 @@ export class GpuTimer {
     encoder.resolveQuerySet(this.querySet, 0, labels.length * 2, this.resolveBuffer, 0);
     encoder.copyBufferToBuffer(this.resolveBuffer, 0, readBuffer, 0, bytes);
     return () => {
+      // Destroying the device rejects every readback still in flight; there is nothing left to record then.
       readBuffer.mapAsync(GPUMapMode.READ, 0, bytes).then(() => {
         const ticks = new BigInt64Array(readBuffer.getMappedRange(0, bytes));
         labels.forEach((label, i) => this.record(label, Number(ticks[i * 2 + 1] - ticks[i * 2]) / 1e6));
@@ -47,7 +48,7 @@ export class GpuTimer {
         this.record('frame', Number(ticks[labels.length * 2 - 1] - ticks[0]) / 1e6);
         readBuffer.unmap();
         this.readBuffers.push(readBuffer);
-      });
+      }, () => {});
     };
   }
 
