@@ -67,16 +67,15 @@ fn noise3(p: vec3<f32>) -> f32 {
   let d = mix(hash3(i + vec3<f32>(0.0, 1.0, 1.0)), hash3(i + vec3<f32>(1.0, 1.0, 1.0)), u.x);
   return mix(mix(a, b, u.y), mix(c, d, u.y), u.z);
 }
-` + SOLIDS + /* wgsl */ `
+` + SOLIDS;
+
 // Velocity lives on the cell faces: texel c holds the flow through its lower x, y and z faces.
-// The side walls, the floor and solids block their faces; the top stays open.
+// The side walls, the floor and solids block their faces; the top stays open. Needs the solid mask bound as solid.
+const BLOCKED = /* wgsl */ `
+fn solidCell(c: vec3<i32>) -> bool { return textureLoad(solid, clampc(c), 0).x > 0.5; }
 fn blocked(c: vec3<i32>) -> vec3<bool> {
-  let p = vec3<f32>(c);
-  let here = isSolid(p);
-  return vec3<bool>(
-    c.x == 0 || here || isSolid(p - vec3<f32>(1.0, 0.0, 0.0)),
-    c.y == 0 || here || isSolid(p - vec3<f32>(0.0, 1.0, 0.0)),
-    c.z == 0 || here || isSolid(p - vec3<f32>(0.0, 0.0, 1.0)));
+  let here = solidCell(c);
+  return vec3<bool>(c.x == 0 || here || solidCell(c - X), c.y == 0 || here || solidCell(c - Y), c.z == 0 || here || solidCell(c - Z));
 }
 `;
 
@@ -280,6 +279,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(1) var vel: texture_3d<f32>;
 @group(0) @binding(2) var force: texture_3d<f32>;
 @group(0) @binding(3) var dst: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(4) var solid: texture_3d<f32>;
+${BLOCKED}
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
@@ -296,11 +297,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(1) var vel: texture_3d<f32>;
 @group(0) @binding(2) var dst: texture_storage_3d<r32float, write>;
 @group(0) @binding(3) var sca: texture_3d<f32>;
+@group(0) @binding(4) var solid: texture_3d<f32>;
+${BLOCKED}
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
   if (!inside(c)) { return; }
-  if (isSolid(vec3<f32>(c))) {
+  if (solidCell(c)) {
     textureStore(dst, c, vec4<f32>(0.0));
     return;
   }
@@ -319,6 +322,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(1) var vel: texture_3d<f32>;
 @group(0) @binding(2) var pressure: texture_3d<f32>;
 @group(0) @binding(3) var dst: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(4) var solid: texture_3d<f32>;
+${BLOCKED}
 fn at(c: vec3<i32>) -> f32 { return textureLoad(pressure, clampc(c), 0).x; }
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {

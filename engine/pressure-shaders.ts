@@ -1,9 +1,12 @@
 import { HEADER } from './simulation-shaders';
 
 // The seven-point Laplacian with the top open: the ghost above the lid holds zero pressure, any other missing neighbour drops out.
-// Every shader binds the level's pressure as "pressure" and has "scale", its cell size in simulation cells.
+// Every shader binds the level's pressure as "pressure" and its solid mask as "solid".
 const STENCIL = /* wgsl */ `
-fn solidAt(c: vec3<i32>) -> bool { return isSolid((vec3<f32>(c) + vec3<f32>(0.5)) * scale - vec3<f32>(0.5)); }
+const X = vec3<i32>(1, 0, 0);
+const Y = vec3<i32>(0, 1, 0);
+const Z = vec3<i32>(0, 0, 1);
+fn solidAt(c: vec3<i32>) -> bool { return textureLoad(solid, c, 0).x > 0.5; }
 fn neighbour(c: vec3<i32>, n: vec3<i32>) -> vec2<f32> {
   if (c.y >= n.y) { return vec2<f32>(0.0, 1.0); }
   if (any(c < vec3<i32>(0)) || any(c >= n) || solidAt(c)) { return vec2<f32>(0.0); }
@@ -16,11 +19,11 @@ fn stencil(c: vec3<i32>, n: vec3<i32>) -> vec2<f32> {
 `;
 
 // Red-black Gauss-Seidel: a half-pass updates one colour from the other, so it runs in place.
-export const SMOOTH = HEADER + /* wgsl */ `
+export const SMOOTH = /* wgsl */ `
 override parity: u32;
-override scale: f32;
-@group(0) @binding(1) var pressure: texture_storage_3d<r32float, read_write>;
-@group(0) @binding(2) var rhs: texture_3d<f32>;
+@group(0) @binding(0) var pressure: texture_storage_3d<r32float, read_write>;
+@group(0) @binding(1) var rhs: texture_3d<f32>;
+@group(0) @binding(2) var solid: texture_3d<f32>;
 ${STENCIL}
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -37,10 +40,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }`;
 
 // The mean residual of eight fine cells becomes the coarse right-hand side; a cell twice the size needs four times the source.
-export const RESTRICT = HEADER + /* wgsl */ `
-override scale: f32;
-@group(0) @binding(1) var pressure: texture_storage_3d<r32float, read>;
-@group(0) @binding(2) var rhs: texture_3d<f32>;
+export const RESTRICT = /* wgsl */ `
+@group(0) @binding(0) var pressure: texture_storage_3d<r32float, read>;
+@group(0) @binding(1) var rhs: texture_3d<f32>;
+@group(0) @binding(2) var solid: texture_3d<f32>;
 @group(0) @binding(3) var coarsePressure: texture_storage_3d<r32float, write>;
 @group(0) @binding(4) var coarseRhs: texture_storage_3d<r32float, write>;
 ${STENCIL}
@@ -87,4 +90,29 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let far = mix(mix(tap(b + Z, nc), tap(b + X + Z, nc), f.x), mix(tap(b + Y + Z, nc), tap(b + X + Y + Z, nc), f.x), f.y);
   let value = mix(near, far, f.z);
   textureStore(pressure, c, textureLoad(pressure, c) + vec4<f32>(value, 0.0, 0.0, 0.0));
+}`;
+
+// The solid mask of the finest level, straight from the box distance field.
+export const MASK = HEADER + /* wgsl */ `
+@group(0) @binding(1) var solid: texture_storage_3d<r32float, write>;
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let c = vec3<i32>(id);
+  if (!inside(c)) { return; }
+  textureStore(solid, c, vec4<f32>(f32(isSolid(vec3<f32>(c))), 0.0, 0.0, 0.0));
+}`;
+
+// A coarse cell is solid when any of its eight fine cells is, so obstacles survive on every level.
+export const COARSEN = /* wgsl */ `
+@group(0) @binding(0) var fine: texture_3d<f32>;
+@group(0) @binding(1) var solid: texture_storage_3d<r32float, write>;
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let c = vec3<i32>(id);
+  if (any(c >= vec3<i32>(textureDimensions(solid)))) { return; }
+  var any = 0.0;
+  for (var k = 0; k < 8; k++) {
+    any = max(any, textureLoad(fine, 2 * c + vec3<i32>(k & 1, (k >> 1u) & 1, (k >> 2u) & 1), 0).x);
+  }
+  textureStore(solid, c, vec4<f32>(any, 0.0, 0.0, 0.0));
 }`;

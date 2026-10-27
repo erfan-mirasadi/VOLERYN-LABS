@@ -74,10 +74,10 @@ export function createSimulation(device: GPUDevice) {
     correctVelocity: bind(pipelines.correctVelocity, [params, velocity, velocity, scratch, advected, sampler]),
     curl: bind(pipelines.curl, [params, advected, curl]),
     forces: both((j) => bind(pipelines.forces, [params, scalars[j], curl, scratch])),
-    applyForces: bind(pipelines.applyForces, [params, advected, scratch, forced]),
-    divergence: both((j) => bind(pipelines.divergence, [params, forced, divergence, scalars[j]])),
-    residual: both((j) => bind(pipelines.divergence, [params, velocity, divergence, scalars[j]])),
-    project: bind(pipelines.project, [params, forced, pressure.texture, velocity]),
+    applyForces: bind(pipelines.applyForces, [params, advected, scratch, forced, pressure.solid]),
+    divergence: both((j) => bind(pipelines.divergence, [params, forced, divergence, scalars[j], pressure.solid])),
+    residual: both((j) => bind(pipelines.divergence, [params, velocity, divergence, scalars[j], pressure.solid])),
+    project: bind(pipelines.project, [params, forced, pressure.texture, velocity, pressure.solid]),
     predict: both((j) => bind(pipelines.predict, [params, velocity, scalars[j], scratch, sampler])),
     correct: both((j) => bind(pipelines.correct, [params, velocity, scalars[j], scratch, scalars[1 - j], sampler])),
     shadow: both((j) => bind(pipelines.shadow, [params, scalars[j], sampler, shadow])),
@@ -122,6 +122,7 @@ export function createSimulation(device: GPUDevice) {
 
   // Velocity first: advect, add forces, project; then the scalars ride the divergence-free field.
   function step(pass: GPUComputePassEncoder) {
+    pressure.updateSolids(pass);
     run(pass, pipelines.predictVelocity, groups.predictVelocity);
     run(pass, pipelines.correctVelocity, groups.correctVelocity);
     run(pass, pipelines.curl, groups.curl);
