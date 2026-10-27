@@ -1,4 +1,4 @@
-const MAX_PASSES = 4;
+const MAX_PASSES = 6;
 const WINDOW = 30;
 
 // Measures each labelled pass on the GPU itself with timestamp queries; averages the last WINDOW frames.
@@ -43,6 +43,8 @@ export class GpuTimer {
       readBuffer.mapAsync(GPUMapMode.READ, 0, bytes).then(() => {
         const ticks = new BigInt64Array(readBuffer.getMappedRange(0, bytes));
         labels.forEach((label, i) => this.record(label, Number(ticks[i * 2 + 1] - ticks[i * 2]) / 1e6));
+        // Passes overlap on tile-based GPUs, so the span from the first pass to the last is the honest frame cost.
+        this.record('frame', Number(ticks[labels.length * 2 - 1] - ticks[0]) / 1e6);
         readBuffer.unmap();
         this.readBuffers.push(readBuffer);
       });

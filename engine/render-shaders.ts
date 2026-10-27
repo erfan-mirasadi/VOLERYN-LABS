@@ -19,7 +19,7 @@ struct View {
   viewport: vec4<f32>,
   layer: f32,
   fireLight: f32,
-  pad1: f32,
+  frame: f32,
   pad2: f32,
 }
 @group(0) @binding(0) var<uniform> V: View;
@@ -46,7 +46,10 @@ fn heatRamp(t: f32) -> vec3<f32> {
   return clamp(vec3<f32>(x, x - 1.0, x - 2.0), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-fn hash2(p: vec2<f32>) -> f32 { return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453); }
+// Interleaved gradient noise, shifted by the golden ratio each frame so the TAA averages the step offsets away.
+fn jitter(p: vec2<f32>, frame: f32) -> f32 {
+  return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y) + frame * 0.618034);
+}
 
 @fragment
 fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
@@ -60,7 +63,7 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let tFar = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
   if (tFar <= max(tNear, 0.0)) { return select(vec4<f32>(0.0), vec4<f32>(0.0, 0.0, 0.0, 1.0), V.layer > 0.5); }
   let size = V.boxMax - V.boxMin;
-  var t = max(tNear, 0.0) + V.stepSize * hash2(frag.xy);
+  var t = max(tNear, 0.0) + V.stepSize * jitter(frag.xy, V.frame);
   var transmittance = 1.0;
   var fire = vec3<f32>(0.0);
   var smoke = vec3<f32>(0.0);
@@ -122,4 +125,49 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   }
   if (V.layer == 5.0) { return vec4<f32>(heatRamp(hottest), 1.0); }
   return vec4<f32>(tonemap((fire + smoke + solid) * V.exposure), alpha);
+}`;
+
+// Temporal blend of the jittered raymarch with the last frame, the history clamped to the current neighbourhood so it cannot ghost.
+export const RESOLVE = /* wgsl */ `
+struct Taa { blend: f32 }
+@group(0) @binding(0) var<uniform> T: Taa;
+@group(0) @binding(1) var current: texture_2d<f32>;
+@group(0) @binding(2) var history: texture_2d<f32>;
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  var corners = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+  return vec4<f32>(corners[i], 0.0, 1.0);
+}
+@fragment
+fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let p = vec2<i32>(frag.xy);
+  let last = vec2<i32>(textureDimensions(current)) - vec2<i32>(1);
+  let now = textureLoad(current, p, 0);
+  var lo = now;
+  var hi = now;
+  for (var y = -1; y <= 1; y++) {
+    for (var x = -1; x <= 1; x++) {
+      let s = textureLoad(current, clamp(p + vec2<i32>(x, y), vec2<i32>(0), last), 0);
+      lo = min(lo, s);
+      hi = max(hi, s);
+    }
+  }
+  let old = clamp(textureLoad(history, p, 0), lo, hi);
+  return mix(old, now, T.blend);
+}`;
+
+// Bilinear upsample of the resolved frame onto the canvas.
+export const COMPOSITE = /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var lin: sampler;
+struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> }
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> Out {
+  var corners = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+  let c = corners[i];
+  return Out(vec4<f32>(c, 0.0, 1.0), vec2<f32>(0.5 * (c.x + 1.0), 0.5 * (1.0 - c.y)));
+}
+@fragment
+fn fs(in: Out) -> @location(0) vec4<f32> {
+  return textureSampleLevel(src, lin, in.uv, 0.0);
 }`;

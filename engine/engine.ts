@@ -6,15 +6,27 @@ import { createSimulation } from './simulation';
 
 const FOV = (35 * Math.PI) / 180;
 const ORBIT_DISTANCE = 3;
-const MAX_PIXEL_RATIO = 1.25;
+const MAX_PIXEL_RATIO = 2;
 const BURST_LENGTH = 0.3;
 const BURST_EVERY = 5;
+const TAA_BLEND = 0.2;
+const TAA_BLEND_MOVING = 0.5;
+// The raymarch resolution relative to the canvas: it steps down while frames drop and back up once they have held.
+const SCALE_MIN = 0.375;
+const SCALE_MAX = 1;
+const SCALE_STEP = 0.125;
+const SCALE_HOLD_MS = 4000;
 
 export type EngineStats = {
   fps: number;
+  displayHz: number;
+  renderScale: number;
+  gpuMs: number;
   simulationMs: number;
   lightingMs: number;
-  renderMs: number;
+  raymarchMs: number;
+  taaMs: number;
+  compositeMs: number;
   stepsPerSecond: number;
   grid: readonly number[];
   adapterName: string;
@@ -63,15 +75,37 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   let stepsSince = 0;
   let stepCount = 0;
   let stepsPerSecond = 0;
+  let frameIndex = 0;
+  let renderScale = 0.5;
+  let scaleHoldUntil = 0;
+  let displayHz = 60;
+  const frameGaps: number[] = [];
+
+  // Frames are dropping when rAF runs clearly below the display rate, which the shortest gaps reveal.
+  function adjustQuality(now: number) {
+    frameGaps.sort((a, b) => a - b);
+    displayHz = Math.min(360, 1000 / frameGaps[Math.floor(frameGaps.length * 0.1)]);
+    frameGaps.length = 0;
+    const dropping = fps < displayHz * 0.92;
+    if (dropping && renderScale > SCALE_MIN) {
+      renderScale -= SCALE_STEP;
+      scaleHoldUntil = now + SCALE_HOLD_MS;
+    } else if (!dropping && now > scaleHoldUntil && renderScale < SCALE_MAX) {
+      renderScale += SCALE_STEP;
+    }
+  }
 
   function tick(now: number) {
     if (!running || !visible) {
       looping = false;
       return;
     }
-    accumulator = Math.min(accumulator + (now - lastFrame) / 1000, 4 * DT);
+    const gap = now - lastFrame;
+    accumulator = Math.min(accumulator + gap / 1000, 4 * DT);
     lastFrame = now;
-    if (!drag && Math.abs(spinAzimuth) + Math.abs(spinPolar) > 1e-4) {
+    if (gap > 0) frameGaps.push(gap);
+    const spinning = Math.abs(spinAzimuth) + Math.abs(spinPolar) > 1e-4;
+    if (!drag && spinning) {
       azimuth += spinAzimuth;
       polar = clampPolar(polar + spinPolar);
       spinAzimuth *= 0.9;
@@ -94,23 +128,29 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     simulation.updateLighting(lightingPass);
     lightingPass.end();
 
-    renderer.writeView(
-      { eye: eye(), target, tanHalfFov: Math.tan(FOV / 2), aspect: canvas.width / canvas.height, rect: [0, 0, canvas.width, canvas.height] },
+    renderer.draw(encoder, context.getCurrentTexture().createView(), {
+      camera: { eye: eye(), target, tanHalfFov: Math.tan(FOV / 2) },
       preset,
-      simTime,
-    );
-    renderer.draw(encoder, context.getCurrentTexture().createView(), simulation.scalarIndex, timer.timestamps('render'));
+      time: simTime,
+      index: frameIndex++,
+      scalarIndex: simulation.scalarIndex,
+      width: Math.max(1, Math.round(canvas.width * renderScale)),
+      height: Math.max(1, Math.round(canvas.height * renderScale)),
+      blend: drag || spinning ? TAA_BLEND_MOVING : TAA_BLEND,
+      timestamps: { render: timer.timestamps('render'), taa: timer.timestamps('taa'), composite: timer.timestamps('composite') },
+    });
     const collect = timer.resolve(encoder);
     device.queue.submit([encoder.finish()]);
     collect();
 
     fpsFrames++;
-    if (now - fpsSince > 500) {
+    if (now - fpsSince > 1000) {
       fps = (fpsFrames * 1000) / (now - fpsSince);
       stepsPerSecond = ((stepCount - stepsSince) * 1000) / (now - fpsSince);
       fpsSince = now;
       fpsFrames = 0;
       stepsSince = stepCount;
+      adjustQuality(now);
     }
     frame = requestAnimationFrame(tick);
   }
@@ -180,6 +220,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       tweaks = { ...tweaks, vorticity: next.vorticity };
       boxes = next.objects?.map((box) => ({ ...box })) ?? [];
       simulation.clear();
+      renderer.resetHistory();
       burstStart = simTime;
     },
     setTweaks(next: Partial<Tweaks>) {
@@ -192,9 +233,14 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       const times = timer.averages();
       return {
         fps,
+        displayHz,
+        renderScale,
+        gpuMs: times.frame ?? 0,
         simulationMs: times.simulation ?? 0,
         lightingMs: times.lighting ?? 0,
-        renderMs: times.render ?? 0,
+        raymarchMs: times.render ?? 0,
+        taaMs: times.taa ?? 0,
+        compositeMs: times.composite ?? 0,
         stepsPerSecond,
         grid: GRID,
         adapterName,
