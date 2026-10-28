@@ -122,9 +122,9 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     if (soundOn && preset.mode === 'explosion') sound?.burst();
   }
 
-  // One simulation step of dt seconds; an explosion re-arms its charge every BURST_EVERY seconds.
+  // One simulation step of dt seconds; a live explosion re-arms its charge every BURST_EVERY seconds, an exported one goes off once.
   function advance(pass: GPUComputePassEncoder, dt: number, slot = 0) {
-    if (preset.mode === 'explosion' && simTime - burstStart > BURST_EVERY) startBurst();
+    if (!exporting && preset.mode === 'explosion' && simTime - burstStart > BURST_EVERY) startBurst();
     const age = simTime - burstStart;
     const emitting = preset.mode !== 'explosion' || age < (preset.burst ?? 0);
     const blast = preset.mode === 'explosion' ? (preset.blast ?? 0) * Math.exp(-age / BLAST_DECAY) : 0;
