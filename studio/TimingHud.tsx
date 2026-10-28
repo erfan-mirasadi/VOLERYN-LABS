@@ -29,6 +29,7 @@ export default function TimingHud() {
     ['steps', `${stats.stepsPerSecond.toFixed(0)} /s`],
     ['divergence', stats.residual.toExponential(1)],
     ['grid', stats.grid.join(' × ')],
+    ['sound', typeof stats.sound === 'number' ? `${stats.sound.toFixed(0)} dB` : stats.sound],
   ];
 
   return (
