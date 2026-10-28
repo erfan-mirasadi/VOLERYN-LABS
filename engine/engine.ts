@@ -120,8 +120,8 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       const age = simTime - burstStart;
       const emitting = preset.mode !== 'explosion' || age < (preset.burst ?? 0);
       const blast = preset.mode === 'explosion' ? (preset.blast ?? 0) * Math.exp(-age / BLAST_DECAY) : 0;
-      simulation.writeParams(preset, tweaks, boxes, simTime, emitting, blast);
-      simulation.step(simulationPass);
+      simulation.writeParams(preset, tweaks, boxes, simTime, emitting, blast, n);
+      simulation.step(simulationPass, n);
       accumulator -= DT;
       simTime += DT;
       stepCount++;

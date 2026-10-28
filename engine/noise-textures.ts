@@ -1,7 +1,7 @@
 // Tileable 32^3 noise baked once on the CPU: four channels of value-noise fBm, and the curl of three of them, which is
 // divergence-free so the pressure solve leaves it alone when it stirs the gas.
 const SIZE = 32;
-const LATTICES = [4, 8, 16];
+const LATTICES = [2, 4, 8];
 const WEIGHTS = [1, 0.5, 0.25];
 
 export type NoiseTextures = ReturnType<typeof createNoiseTextures>;
@@ -38,7 +38,7 @@ export function createNoiseTextures(device: GPUDevice) {
     return texture;
   };
   return {
-    noise: upload('rgba8unorm', noise),
+    values: upload('rgba8unorm', noise),
     curl: upload('rgba8snorm', curl),
     repeat: device.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat', addressModeW: 'repeat' }),
   };

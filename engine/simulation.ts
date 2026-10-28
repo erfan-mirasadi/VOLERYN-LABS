@@ -4,7 +4,6 @@ import { createPressureSolver } from './pressure';
 import {
   type Box,
   DT,
-  FLOW_PERIOD,
   GRID,
   LIGHT,
   LIGHT_BLUR_PASSES,
@@ -32,7 +31,7 @@ export type Volumes = {
   light: GPUTexture;
   params: GPUBuffer;
   sampler: GPUSampler;
-  textures: NoiseTextures;
+  noise: NoiseTextures;
 };
 
 export type Simulation = ReturnType<typeof createSimulation>;
@@ -60,10 +59,13 @@ export function createSimulation(device: GPUDevice) {
     addressModeV: 'clamp-to-edge',
     addressModeW: 'clamp-to-edge',
   });
-  const params = device.createBuffer({ size: PARAM_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const both = <T>(make: (i: number) => T) => [make(0), make(1)];
+  // A frame may run two steps before it submits, and writing one buffer twice would hand both steps the second
+  // step's params, so each step slot has its own.
+  const paramSlots = both(() => device.createBuffer({ size: PARAM_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
   const staging = device.createBuffer({ size: ROW_BYTES * GRID[1] * GRID[2], usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-  const pressure = createPressureSolver(device, params, divergence);
-  const textures = createNoiseTextures(device);
+  const pressure = createPressureSolver(device, paramSlots[0], divergence);
+  const noise = createNoiseTextures(device);
 
   const compute = (code: string, constants?: Record<string, number>) =>
     device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code }), entryPoint: 'main', constants } });
@@ -77,27 +79,29 @@ export function createSimulation(device: GPUDevice) {
   const lightBlur = [compute(LIGHT_BLUR, { dilate: 0 }), compute(LIGHT_BLUR, { dilate: 1 })];
 
   const bind = (pipeline: GPUComputePipeline, resources: (GPUBuffer | GPUTexture | GPUSampler)[]) => bindResources(device, pipeline, resources);
-  const both = <T>(make: (i: number) => T) => [make(0), make(1)];
-  const groups = {
+  // The step's bind groups, one set per params slot.
+  const groups = paramSlots.map((params) => ({
     predictVelocity: bind(pipelines.predictVelocity, [params, velocity, velocity, scratch, sampler]),
     correctVelocity: bind(pipelines.correctVelocity, [params, velocity, velocity, scratch, advected, sampler]),
     curl: bind(pipelines.curl, [params, advected, curl]),
-    forces: both((j) => bind(pipelines.forces, [params, scalars[j], curl, scratch, textures.curl, textures.repeat])),
+    forces: both((j) => bind(pipelines.forces, [params, scalars[j], curl, scratch, noise.curl, noise.repeat])),
     applyForces: bind(pipelines.applyForces, [params, advected, scratch, forced, pressure.solid]),
     divergence: both((j) => bind(pipelines.divergence, [params, forced, divergence, scalars[j], pressure.solid])),
-    residual: both((j) => bind(pipelines.divergence, [params, velocity, divergence, scalars[j], pressure.solid])),
     project: bind(pipelines.project, [params, forced, pressure.texture, velocity, pressure.solid]),
     predict: both((j) => bind(pipelines.predict, [params, velocity, scalars[j], scratch, sampler])),
     correct: both((j) => bind(pipelines.correct, [params, velocity, scalars[j], scratch, scalars[1 - j], sampler])),
     advectFlow: both((j) => bind(pipelines.advectFlow, [params, velocity, ...flows[j], ...flows[1 - j], sampler])),
-    shadow: both((j) => bind(pipelines.shadow, [params, scalars[j], sampler, shadow])),
+  }));
+  const residual = both((j) => bind(pipelines.divergence, [paramSlots[0], velocity, divergence, scalars[j], pressure.solid]));
+  const lighting = {
+    shadow: both((j) => bind(pipelines.shadow, [paramSlots[0], scalars[j], sampler, shadow])),
     emission: both((j) => bind(emission, [scalars[j], light[0]])),
-    lightBlur: lightBlur.map((pipeline) => both((k) => bind(pipeline, [light[k], light[1 - k]]))),
-    clear: [
-      ...[velocity, ...scalars, ...flows.flat()].map((t) => [clearHalf, bind(clearHalf, [t])] as const),
-      [clearFloat, bind(clearFloat, [pressure.texture])] as const,
-    ],
+    blur: lightBlur.map((pipeline) => both((k) => bind(pipeline, [light[k], light[1 - k]]))),
   };
+  const clearGroups = [
+    ...[velocity, ...scalars, ...flows.flat()].map((t) => [clearHalf, bind(clearHalf, [t])] as const),
+    [clearFloat, bind(clearFloat, [pressure.texture])] as const,
+  ];
 
   const workgroups = GRID.map((n) => Math.ceil(n / 4)) as [number, number, number];
   const flowWorkgroups = FLOW_GRID.map((n) => Math.ceil(n / 4)) as [number, number, number];
@@ -112,20 +116,12 @@ export function createSimulation(device: GPUDevice) {
   // Which scalar texture holds the latest state; the pair ping-pongs every step.
   let sc = 0;
   const paramData = new Float32Array(PARAM_FLOATS);
-  // The flow fields reset half a period apart; a change of phase since the last step flags the reset.
-  let phaseA = 0;
-  let phaseB = 0;
 
-  function writeParams(preset: Preset, tweaks: Tweaks, boxes: Box[], time: number, emitting: boolean, blast: number) {
+  function writeParams(preset: Preset, tweaks: Tweaks, boxes: Box[], time: number, emitting: boolean, blast: number, slot: number) {
     const boxData = Array.from({ length: MAX_BOXES }, (_, i) => {
       const box = boxes[i];
       return box ? [box.x, box.y, box.z, box.yaw, box.hx, box.hy, box.hz, 1] : [0, 0, 0, 0, 0, 0, 0, 0];
     }).flat();
-    const nextA = Math.floor(time / FLOW_PERIOD);
-    const nextB = Math.floor(time / FLOW_PERIOD + 0.5);
-    const flowReset = (nextA !== phaseA ? 1 : 0) + (nextB !== phaseB ? 2 : 0);
-    phaseA = nextA;
-    phaseB = nextB;
     paramData.set([
       ...GRID, DT,
       time, preset.buoyancy * tweaks.heat, preset.cooling, tweaks.vorticity,
@@ -134,37 +130,38 @@ export function createSimulation(device: GPUDevice) {
       emitting ? preset.emit : 0, preset.smokeYield, preset.heat * tweaks.heat, preset.dissipation,
       ...LIGHT, MODE_INDEX[preset.mode],
       preset.turbulence, preset.damping, preset.expansion, blast,
-      preset.ignite, flowReset, 0, 0,
+      preset.ignite, 0, 0, 0,
       ...boxData,
     ]);
-    device.queue.writeBuffer(params, 0, paramData);
+    device.queue.writeBuffer(paramSlots[slot], 0, paramData);
   }
 
   // Velocity first: advect, add forces, project; then the scalars ride the divergence-free field.
-  function step(pass: GPUComputePassEncoder) {
+  function step(pass: GPUComputePassEncoder, slot: number) {
+    const g = groups[slot];
     pressure.updateSolids(pass);
-    run(pass, pipelines.predictVelocity, groups.predictVelocity);
-    run(pass, pipelines.correctVelocity, groups.correctVelocity);
-    run(pass, pipelines.curl, groups.curl);
-    run(pass, pipelines.forces, groups.forces[sc]);
-    run(pass, pipelines.applyForces, groups.applyForces);
-    run(pass, pipelines.divergence, groups.divergence[sc]);
+    run(pass, pipelines.predictVelocity, g.predictVelocity);
+    run(pass, pipelines.correctVelocity, g.correctVelocity);
+    run(pass, pipelines.curl, g.curl);
+    run(pass, pipelines.forces, g.forces[sc]);
+    run(pass, pipelines.applyForces, g.applyForces);
+    run(pass, pipelines.divergence, g.divergence[sc]);
     pressure.solve(pass);
-    run(pass, pipelines.project, groups.project);
-    run(pass, pipelines.predict, groups.predict[sc]);
-    run(pass, pipelines.correct, groups.correct[sc]);
-    run(pass, pipelines.advectFlow, groups.advectFlow[sc], flowWorkgroups);
+    run(pass, pipelines.project, g.project);
+    run(pass, pipelines.predict, g.predict[sc]);
+    run(pass, pipelines.correct, g.correct[sc]);
+    run(pass, pipelines.advectFlow, g.advectFlow[sc], flowWorkgroups);
     sc = 1 - sc;
   }
 
   // The shadow volume and the flame's light volume, both read by the render; the blur ping-pongs and ends in light[0].
   // The first two blurs also dilate the occupancy by two coarse cells, the margin the raymarch's empty-space skip needs.
   function updateLighting(pass: GPUComputePassEncoder) {
-    run(pass, pipelines.shadow, groups.shadow[sc], shadowWorkgroups);
-    run(pass, emission, groups.emission[sc], lightWorkgroups);
+    run(pass, pipelines.shadow, lighting.shadow[sc], shadowWorkgroups);
+    run(pass, emission, lighting.emission[sc], lightWorkgroups);
     for (let i = 0; i < LIGHT_BLUR_PASSES * 2; i++) {
       const dilate = i < 2 ? 1 : 0;
-      run(pass, lightBlur[dilate], groups.lightBlur[dilate][i % 2], lightWorkgroups);
+      run(pass, lightBlur[dilate], lighting.blur[dilate][i % 2], lightWorkgroups);
     }
   }
 
@@ -175,7 +172,7 @@ export function createSimulation(device: GPUDevice) {
     reading = true;
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
-    run(pass, pipelines.divergence, groups.residual[1 - sc]);
+    run(pass, pipelines.divergence, residual[1 - sc]);
     pass.end();
     encoder.copyTextureToBuffer({ texture: divergence }, { buffer: staging, bytesPerRow: ROW_BYTES, rowsPerImage: GRID[1] }, [...GRID]);
     device.queue.submit([encoder.finish()]);
@@ -198,20 +195,20 @@ export function createSimulation(device: GPUDevice) {
   function clear() {
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
-    for (const [pipeline, group] of groups.clear) run(pass, pipeline, group);
+    for (const [pipeline, group] of clearGroups) run(pass, pipeline, group);
     pass.end();
     device.queue.submit([encoder.finish()]);
   }
 
   function dispose() {
     for (const texture of [velocity, advected, forced, scratch, ...scalars, ...flows.flat(), curl, divergence, shadow, ...light]) texture.destroy();
-    textures.noise.destroy();
-    textures.curl.destroy();
+    noise.values.destroy();
+    noise.curl.destroy();
     pressure.dispose();
-    params.destroy();
+    for (const buffer of paramSlots) buffer.destroy();
     staging.destroy();
   }
 
-  const volumes: Volumes = { scalars, flows, shadow, light: light[0], params, sampler, textures };
+  const volumes: Volumes = { scalars, flows, shadow, light: light[0], params: paramSlots[0], sampler, noise };
   return { volumes, writeParams, step, updateLighting, readResidual, clear, dispose, get scalarIndex() { return sc; } };
 }

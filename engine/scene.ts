@@ -11,7 +11,7 @@ export const EXPOSURE = 1.0;
 export const LIGHT = normalize([-0.45, 0.8, 0.4]);
 // The key light and the sky and ground that light the smoke from above and below.
 export const KEY_COLOR = [1.0, 0.95, 0.88];
-export const KEY_STRENGTH = 0.6;
+export const KEY_STRENGTH = 0.7;
 export const SKY_COLOR = [0.2, 0.23, 0.32];
 export const GROUND_COLOR = [0.08, 0.07, 0.06];
 export const MAX_BOXES = 4;
@@ -19,7 +19,7 @@ export const MAX_BOXES = 4;
 export const BLAST_DECAY = 0.08;
 // The flame's sub-cell detail: cells per noise tile, and how often each of the two flow fields that carry it resets.
 export const NOISE_PERIOD = 8;
-export const FLOW_PERIOD = 1.5;
+export const FLOW_PERIOD = 1.0;
 
 // An axis-aligned box in grid cells, turned about y; its skin gives off fuel and its body blocks the flow.
 export type Box = { x: number; y: number; z: number; yaw: number; hx: number; hy: number; hz: number };

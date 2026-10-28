@@ -1,4 +1,4 @@
-import { DENSITY } from './scene';
+import { DENSITY, FLOW_PERIOD } from './scene';
 
 export const PARAMS_STRUCT = /* wgsl */ `
 struct Params {
@@ -23,7 +23,7 @@ struct Params {
   expansion: f32,
   blast: f32,
   ignite: f32,
-  flowReset: f32,
+  pad1: f32,
   pad2: f32,
   pad3: f32,
   objects: array<vec4<f32>, 8>,
@@ -216,7 +216,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (d < 1.0) {
       var amount = (1.0 - d * d) * (0.35 + 1.3 * flicker) * P.emit * P.dt;
       // An explosion needs a lumpy charge; an even ball of fuel burns into a perfect sphere.
-      if (P.mode == 2.0) { amount *= 2.0 * flicker * flicker; }
+      if (P.mode == 2.0) { amount *= 2.0 * flicker * flicker * (0.3 + 1.4 * noise3(p * 0.15 + vec3<f32>(0.0, 0.1 * P.time, 0.0))); }
       if (P.mode == 1.0) {
         q.x += amount * 0.8;
         q.y += amount * 0.5;
@@ -239,8 +239,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(5) var dstB: texture_storage_3d<rgba16float, write>;
 @group(0) @binding(6) var lin: sampler;
 ${TRACE}
+const FLOW_PERIOD = ${FLOW_PERIOD.toFixed(2)};
 // Two displacement fields ride the flow and take turns resetting to zero, so the detail noise the render looks up
 // through them travels with the gas and never stretches for more than a period. They live on half the grid.
+fn resets(offset: f32) -> bool { return floor(P.time / FLOW_PERIOD + offset) != floor((P.time - P.dt) / FLOW_PERIOD + offset); }
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
@@ -250,9 +252,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let shift = back - p;
   let a = textureSampleLevel(srcA, lin, coord(back), 0.0).xyz + shift;
   let b = textureSampleLevel(srcB, lin, coord(back), 0.0).xyz + shift;
-  let reset = u32(P.flowReset);
-  textureStore(dstA, c, vec4<f32>(select(a, vec3<f32>(0.0), (reset & 1u) != 0u), 0.0));
-  textureStore(dstB, c, vec4<f32>(select(b, vec3<f32>(0.0), (reset & 2u) != 0u), 0.0));
+  textureStore(dstA, c, vec4<f32>(select(a, vec3<f32>(0.0), resets(0.0)), 0.0));
+  textureStore(dstB, c, vec4<f32>(select(b, vec3<f32>(0.0), resets(0.5)), 0.0));
 }`,
   curl: /* wgsl */ `
 @group(0) @binding(1) var vel: texture_3d<f32>;
@@ -300,9 +301,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   v += P.dt * P.wind * (p.y / P.size.y);
   // Rising curl noise stirs the hot gas and the reaction sheet; being divergence-free it survives the projection.
   let rise = vec3<f32>(0.0, -12.0 * P.time, 0.0);
-  let coarse = textureSampleLevel(stir, rep, (p + rise) / 32.0, 0.0).xyz;
-  let fine = textureSampleLevel(stir, rep, (p + 1.7 * rise) / 12.0 + vec3<f32>(0.37), 0.0).xyz;
-  v += P.dt * P.turbulence * (coarse + 0.4 * fine) * clamp(s.y + 0.3 * s.x + 0.05 * s.w, 0.0, 1.5);
+  let stirring = textureSampleLevel(stir, rep, (p + rise) / 24.0, 0.0).xyz;
+  v += P.dt * P.turbulence * stirring * clamp(s.y + 0.3 * s.x + 0.05 * s.w, 0.0, 1.5);
   let d = length(p - P.emitter) / P.radius;
   if (d < 1.0) {
     v.y += P.dt * P.emit * 0.8 * (1.0 - d);
@@ -349,9 +349,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let front = select(textureLoad(vel, clampc(c + Z), 0).z, 0.0, c.z == n.z - 1);
   let div = (right - v.x) + (above - v.y) + (front - v.z);
   // Burning gas expands, and a blast pushes out from the charge: the solve targets this much divergence instead of
-  // none, so the push goes through the projection instead of being stripped by it.
+  // none, so the push goes through the projection instead of being stripped by it. The blast is uneven, so the
+  // fireball breaks into lobes instead of staying a ball.
   let d = length(vec3<f32>(c) - P.emitter) / P.radius;
-  let expansion = P.expansion * textureLoad(sca, c, 0).w + P.blast * max(1.0 - d * d, 0.0);
+  let lumps = 0.2 + 1.6 * noise3(vec3<f32>(c) * 0.12 + vec3<f32>(0.0, 0.0, 0.1 * P.time));
+  let expansion = P.expansion * textureLoad(sca, c, 0).w + P.blast * max(1.0 - d * d, 0.0) * lumps;
   textureStore(dst, c, vec4<f32>(div - expansion, 0.0, 0.0, 0.0));
 }`,
   project: /* wgsl */ `

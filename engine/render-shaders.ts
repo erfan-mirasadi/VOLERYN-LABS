@@ -62,9 +62,11 @@ fn heatRamp(t: f32) -> vec3<f32> {
   return clamp(vec3<f32>(x, x - 1.0, x - 2.0), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-// Interleaved gradient noise, shifted by the golden ratio each frame so the TAA averages the step offsets away.
+// Interleaved gradient noise, slid across the screen each frame so the TAA averages the step offsets into grain
+// rather than a standing dither screen.
 fn jitter(p: vec2<f32>, frame: f32) -> f32 {
-  return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y) + frame * 0.618034);
+  let q = p + 5.588238 * (frame % 64.0);
+  return fract(52.9829189 * fract(0.06711056 * q.x + 0.00583715 * q.y));
 }
 
 // Henyey-Greenstein with the 4 pi folded in, so g = 0 gives 1; smoke scatters mostly forward with a little back.
@@ -129,12 +131,14 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         break;
       }
     }
-    let lightHere = textureSampleLevel(glow, lin, q, 0.0);
-    // Three steps are 4.5 cells, inside the occupancy's 8-cell margin and short of any solid the SDF reports.
-    if (lightHere.a < 0.02 && sd > 4.5) {
+    // Blocks holding gas thinner than 0.02 count as empty and are crossed three steps (4.5 cells) at a time, inside
+    // the occupancy's dilated 8-cell margin and short of any solid the SDF reports.
+    let blocks = vec3<i32>(textureDimensions(glow));
+    if (textureLoad(glow, min(vec3<i32>(q * vec3<f32>(blocks)), blocks - 1), 0).a < 0.02 && sd > 4.5) {
       t += 3.0 * V.stepSize;
       continue;
     }
+    let lightHere = textureSampleLevel(glow, lin, q, 0.0);
     var s = textureSampleLevel(sca, lin, q, 0.0);
     var breakup = 1.0;
     if (V.detail > 0.0 && s.y > 0.2) {
@@ -156,8 +160,9 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let opacity = 1.0 - exp(-sigma * V.stepSize);
     let reach = transmittance * opacity / max(sigma, 1e-4);
     fire += reach * sigmaFire * blackbody(s.y) * V.fire;
-    // Wrenninge octaves: each softer and weaker, standing in for light scattered more than once.
-    let key = phase.x * light.x + 0.5 * phase.y * sqrt(light.x) + 0.25 * phase.z * sqrt(sqrt(light.x));
+    // Wrenninge octaves: each softer and weaker, standing in for light scattered more than once; the weights sum to
+    // one so an unshadowed cell gets exactly the key.
+    let key = (4.0 * phase.x * light.x + 2.0 * phase.y * sqrt(light.x) + phase.z * sqrt(sqrt(light.x))) / 7.0;
     let ambient = mix(GROUND_COLOR, SKY_COLOR, light.y);
     smoke += reach * sigmaSmoke * V.smokeTint * (KEY_STRENGTH * KEY_COLOR * key + ambient + flameLight);
     depthSum += transmittance * opacity * t;
