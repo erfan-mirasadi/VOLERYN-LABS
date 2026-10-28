@@ -27,6 +27,7 @@ export async function createMp4Sink(destination: Destination, file: string, widt
 }
 
 // BT.709 limited-range 4:2:0 done here rather than by the encoder, so every player reads the file the same way.
+// Chroma is the mean of each 2x2 block, so flame edges do not alias; every size offered is even.
 function toI420(rgba: Uint8Array, width: number, height: number) {
   const luma = width * height;
   const out = new Uint8Array(luma + luma / 2);
@@ -34,14 +35,15 @@ function toI420(rgba: Uint8Array, width: number, height: number) {
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const i = (y * width + x) * 4;
-      const r = rgba[i];
-      const g = rgba[i + 1];
-      const b = rgba[i + 2];
-      out[y * width + x] = 16 + ((47 * r + 157 * g + 16 * b) >> 8);
+      out[y * width + x] = 16 + ((47 * rgba[i] + 157 * rgba[i + 1] + 16 * rgba[i + 2]) >> 8);
       if ((x | y) & 1) continue;
+      const j = i + width * 4;
+      const r = rgba[i] + rgba[i + 4] + rgba[j] + rgba[j + 4];
+      const g = rgba[i + 1] + rgba[i + 5] + rgba[j + 1] + rgba[j + 5];
+      const b = rgba[i + 2] + rgba[i + 6] + rgba[j + 2] + rgba[j + 6];
       const c = (y >> 1) * (width >> 1) + (x >> 1);
-      out[luma + c] = 128 + ((-26 * r - 87 * g + 112 * b) >> 8);
-      out[luma + chroma + c] = 128 + ((112 * r - 102 * g - 10 * b) >> 8);
+      out[luma + c] = 128 + ((-26 * r - 87 * g + 112 * b) >> 10);
+      out[luma + chroma + c] = 128 + ((112 * r - 102 * g - 10 * b) >> 10);
     }
   }
   return out;
