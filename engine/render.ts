@@ -1,11 +1,9 @@
 import { COMPOSITE, RENDER, RESOLVE } from './render-shaders';
-import { DENSITY, EXPOSURE, FIRE_LIGHT, GRID, type Preset } from './scene';
+import { BOX_MAX, BOX_MIN, DENSITY, EXPOSURE, FIRE_LIGHT, GRID, type Preset } from './scene';
 import type { Volumes } from './simulation';
 
 const VIEW_FLOATS = 36;
 const TARGET_FORMAT: GPUTextureFormat = 'rgba16float';
-const BOX_MIN = [-0.5, 0, (-0.5 * GRID[2]) / GRID[0]];
-const BOX_MAX = [0.5, GRID[1] / GRID[0], (0.5 * GRID[2]) / GRID[0]];
 
 export type Vec3 = [number, number, number];
 

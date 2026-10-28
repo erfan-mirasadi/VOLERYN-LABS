@@ -1,14 +1,12 @@
 import { requestGpu } from './gpu';
 import { GpuTimer } from './gpu-timer';
 import { createRenderer, type Vec3 } from './render';
-import { type Box, DT, GRID, MAX_BOXES, type Preset, type Tweaks } from './scene';
+import { type Box, BURST_EVERY, BURST_LENGTH, DT, GRID, MAX_BOXES, type Preset, type Tweaks } from './scene';
 import { createSimulation } from './simulation';
 
 const FOV = (35 * Math.PI) / 180;
 const ORBIT_DISTANCE = 3;
 const MAX_PIXEL_RATIO = 2;
-const BURST_LENGTH = 0.3;
-const BURST_EVERY = 5;
 const TAA_BLEND = 0.2;
 const TAA_BLEND_MOVING = 0.5;
 // The raymarch resolution relative to the canvas: it steps down while frames drop and back up once they have held.

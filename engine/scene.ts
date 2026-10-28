@@ -10,6 +10,11 @@ export const DENSITY = 14;
 export const EXPOSURE = 0.8;
 export const LIGHT = normalize([-0.45, 0.8, 0.4]);
 export const MAX_BOXES = 4;
+// The simulation box in world units: a cell is 1/GRID[0] wide and the floor sits at y = 0.
+export const BOX_MIN = [-0.5, 0, (-0.5 * GRID[2]) / GRID[0]] as const;
+export const BOX_MAX = [0.5, GRID[1] / GRID[0], (0.5 * GRID[2]) / GRID[0]] as const;
+export const BURST_LENGTH = 0.3;
+export const BURST_EVERY = 5;
 
 // An axis-aligned box in grid cells, turned about y; its skin gives off fuel and its body blocks the flow.
 export type Box = { x: number; y: number; z: number; yaw: number; hx: number; hy: number; hz: number };
