@@ -1,4 +1,5 @@
 import Logo from '@/app/Logo';
+import ExportPanel from './ExportPanel';
 import SimulationPanel from './SimulationPanel';
 import Viewport from './Viewport';
 
@@ -9,6 +10,7 @@ export default function Studio() {
       <aside className="flex w-full flex-col gap-8 border-t border-line bg-panel p-5 lg:w-80 lg:overflow-y-auto lg:border-l lg:border-t-0">
         <Logo />
         <SimulationPanel />
+        <ExportPanel />
       </aside>
     </div>
   );

@@ -12,11 +12,13 @@ type StudioState = {
   presetId: string;
   tweaks: Tweaks;
   backdrop: Backdrop;
+  exporting: boolean;
   setEngine: (engine: Engine | null, status: GpuStatus) => void;
   setPreset: (presetId: string) => void;
   setTweak: (key: keyof Tweaks, value: number) => void;
   addCube: () => void;
   setBackdrop: (backdrop: Backdrop) => void;
+  setExporting: (exporting: boolean) => void;
 };
 
 export const useStudioStore = create<StudioState>()((set, get) => ({
@@ -25,6 +27,7 @@ export const useStudioStore = create<StudioState>()((set, get) => ({
   presetId: PRESETS[0].id,
   tweaks: { heat: 1, vorticity: PRESETS[0].vorticity, wind: 0, seed: 0 },
   backdrop: 'checker',
+  exporting: false,
   setEngine: (engine, status) => set({ engine, status }),
   setPreset: (presetId) => {
     const preset = presetById(presetId);
@@ -48,4 +51,5 @@ export const useStudioStore = create<StudioState>()((set, get) => ({
     });
   },
   setBackdrop: (backdrop) => set({ backdrop }),
+  setExporting: (exporting) => set({ exporting }),
 }));

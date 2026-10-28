@@ -16,12 +16,12 @@ const BACKDROPS: { id: Backdrop; label: string }[] = [
   { id: 'light', label: 'Light' },
 ];
 
-const chip = (active: boolean) =>
+export const chip = (active: boolean) =>
   `rounded-full px-3 py-1 text-sm transition-colors ${active ? 'bg-foreground text-background' : 'text-muted hover:text-foreground'}`;
 
 export default function SimulationPanel() {
-  const { presetId, tweaks, backdrop, status, setPreset, setTweak, addCube, setBackdrop } = useStudioStore();
-  const disabled = status !== 'ready';
+  const { presetId, tweaks, backdrop, status, exporting, setPreset, setTweak, addCube, setBackdrop } = useStudioStore();
+  const disabled = status !== 'ready' || exporting;
   const preset = presetById(presetId);
 
   return (
