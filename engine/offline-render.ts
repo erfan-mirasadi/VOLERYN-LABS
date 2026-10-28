@@ -44,6 +44,7 @@ export type OfflineContext = {
   simulation: Simulation;
   renderer: Renderer;
   preset: Preset;
+  blue: number;
   // Runs one simulation step and returns the simulation time after it.
   step: (dt: number) => number;
 };
@@ -176,6 +177,7 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
         renderer.drawExportSample(targets, {
           camera: job.camera,
           preset: ctx.preset,
+          blue: ctx.blue,
           time,
           source,
           jitter: [halton(s + 1, 2) - 0.5, halton(s + 1, 3) - 0.5],

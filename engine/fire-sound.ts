@@ -39,7 +39,8 @@ export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
   // RMS of the flutter noise after a lowpass at cutoff, so a depth means the same at any cutoff and sample rate.
   const flutterRms = (cutoff: number) => 0.577 * Math.sqrt((1.11 * cutoff) / ((FLUTTER_RATE * rate) / 2));
 
-  const compressor = new DynamicsCompressorNode(ctx, { threshold: -12, knee: 6, ratio: 4, attack: 0.003, release: 0.25 });
+  // A limiter, not a leveller: the controls must be heard, so only the explosion's peaks get caught.
+  const compressor = new DynamicsCompressorNode(ctx, { threshold: -8, knee: 4, ratio: 12, attack: 0.002, release: 0.15 });
   const master = gain();
   const analyser = new AnalyserNode(ctx, { fftSize: 2048 });
   compressor.connect(master).connect(analyser).connect(ctx.destination);
@@ -90,31 +91,34 @@ export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
   function scene(preset: Preset, tweaks: Tweaks, boxes: Box[]) {
     const h = tweaks.heat;
     const w = Math.abs(tweaks.wind) / 60;
+    const v = tweaks.vorticity / 14;
     const objects = preset.mode === 'objects';
     // Emitting cells: the 2.5-cell skin at mean weight 0.5 around each box, or the (1 - d²) ball of the fire kernel.
     const cells = objects
       ? boxes.reduce((sum, b) => sum + 10 * (b.hx * b.hy + b.hy * b.hz + b.hz * b.hx), 0)
       : 0.4 * (4 / 3) * Math.PI * preset.radius ** 3;
     const burning = preset.mode !== 'explosion';
-    const power = burning ? (preset.emit * preset.heat * h * cells) / 47600 : 0;
+    const power = burning ? (preset.emit * preset.heat * cells) / 47600 : 0;
     const flow = burning ? (preset.emit * cells) / 36600 : 0;
     const centre = objects ? (['x', 'y', 'z'] as const).map((key) => boxes.reduce((sum, b) => sum + b[key], 0) / boxes.length) : preset.emitter;
     place(base, centre, 0, 0);
-    place(plume, centre, (0.35 * tweaks.wind) / 60, 0.7);
+    place(plume, centre, (0.5 * tweaks.wind) / 60, 0.7);
 
-    rest = { rumble: 0.35 * Math.sqrt(power), roar: 0.3 * Math.sqrt(power), cutoff: 250 + 350 * Math.min(1.5, (preset.buoyancy * h) / 40) };
+    // Heat is the loudest control: a hot fire roars louder and brighter, a cool one murmurs low.
+    rest = { rumble: 0.35 * Math.sqrt(power) * h * h, roar: 0.3 * Math.sqrt(power) * h ** 1.5, cutoff: 150 + 700 * Math.min(1.5, (preset.buoyancy * h) / 40) };
     glide(rumble.gain, rest.rumble);
     glide(roar.gain, rest.roar);
     glide(roarFilter.frequency, rest.cutoff);
-    const puffRate = 2.5 * Math.sqrt((preset.buoyancy * h) / 32) + 0.5 * tweaks.vorticity + 2 * w;
+    // Vorticity is the flutter: a still flame barely wavers, a swirling one beats hard and fast.
+    const puffRate = 2 * Math.sqrt((preset.buoyancy * h) / 32) + 8 * v + 2 * w;
     glide(puffFilter.frequency, puffRate);
-    glide(puff.gain, (0.25 + (0.5 * tweaks.vorticity) / 14) / flutterRms(puffRate));
-    glide(hiss.gain, Math.sqrt(flow) * (0.03 + (0.025 * preset.turbulence) / 60) + 0.08 * w);
-    const windLevel = 0.8 * w ** 1.5;
+    glide(puff.gain, (0.1 + 0.8 * v) / flutterRms(puffRate));
+    glide(hiss.gain, Math.sqrt(flow) * (0.03 + (0.025 * preset.turbulence) / 60) + 0.3 * w);
+    const windLevel = 1.4 * w ** 1.2;
     glide(wind.gain, windLevel);
     glide(gust.gain, (0.6 * windLevel) / flutterRms(0.4));
 
-    crackleRate = power * (objects ? 35 : 4);
+    crackleRate = power * h * (objects ? 35 : 8);
     crackleGain = objects ? 0.9 : 0.5;
     strength = Math.min(1.3, (preset.expansion * preset.emit * h) / 5.6);
     cooling = preset.cooling;

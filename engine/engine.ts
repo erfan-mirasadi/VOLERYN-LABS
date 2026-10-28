@@ -47,7 +47,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   const timer = new GpuTimer(device, hasTimestamps);
 
   let preset = initialPreset;
-  let tweaks: Tweaks = { heat: 1, vorticity: initialPreset.vorticity, wind: 0, seed: 0 };
+  let tweaks: Tweaks = { heat: 1, vorticity: initialPreset.vorticity, wind: 0, seed: 0, blue: initialPreset.blue };
   let boxes: Box[] = initialPreset.objects?.map((box) => ({ ...box })) ?? [];
   let simTime = 0;
   let burstStart = 0;
@@ -164,6 +164,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     renderer.draw(encoder, context.getCurrentTexture().createView(), {
       camera: { eye: eye(), target, tanHalfFov: Math.tan(FOV / 2) },
       preset,
+      blue: tweaks.blue,
       time: simTime,
       index: frameIndex++,
       scalarIndex: simulation.scalarIndex,
@@ -258,7 +259,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     lost: onDeviceLost,
     setPreset(next: Preset) {
       preset = next;
-      tweaks = { heat: 1, vorticity: next.vorticity, wind: 0, seed: tweaks.seed };
+      tweaks = { heat: 1, vorticity: next.vorticity, wind: 0, seed: tweaks.seed, blue: next.blue };
       boxes = next.objects?.map((box) => ({ ...box })) ?? [];
       simulation.clear();
       renderer.resetHistory();
@@ -313,7 +314,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
         return simTime;
       };
       try {
-        await renderOffline({ device, context, canvas, simulation, renderer, preset, step }, job, onFrame, signal);
+        await renderOffline({ device, context, canvas, simulation, renderer, preset, blue: tweaks.blue, step }, job, onFrame, signal);
       } finally {
         exporting = false;
         syncSound();

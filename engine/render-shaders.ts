@@ -23,6 +23,7 @@ const KEY_STRENGTH = ${KEY_STRENGTH.toFixed(3)};
 const SKY_COLOR = ${vec3(SKY_COLOR)};
 const GROUND_COLOR = ${vec3(GROUND_COLOR)};
 const NOISE_PERIOD = ${NOISE_PERIOD.toFixed(1)};
+const BLUE_FLAME = vec3<f32>(1.5, 3.6, 12.0);
 const ALBEDO = vec3<f32>(0.03, 0.025, 0.02);
 struct View {
   camPos: vec3<f32>,
@@ -47,7 +48,7 @@ struct View {
   detail: f32,
   flowWeight: f32,
   sampleWeight: f32,
-  pad: f32,
+  blue: f32,
 }
 @group(0) @binding(0) var<uniform> V: View;
 @group(0) @binding(1) var sca: texture_3d<f32>;
@@ -169,14 +170,19 @@ fn march(frag: vec2<f32>) -> March {
     if (V.detail > 0.0 && s.y > 0.2) {
       // Sub-cell tongues: noise looked up where the gas came from, so it travels with the flow. The two fields are
       // blended by value, never by coordinate: a coordinate blend alternates between a frozen pattern and one moving
-      // at twice the gas speed.
-      let nA = textureSampleLevel(noise, rep, (g + textureSampleLevel(flowA, lin, q, 0.0).xyz) / NOISE_PERIOD, 0.0);
-      let nB = textureSampleLevel(noise, rep, (g + textureSampleLevel(flowB, lin, q, 0.0).xyz) / NOISE_PERIOD, 0.0);
+      // at twice the gas speed. The lookup is stretched upwards so the tongues streak with the rise instead of
+      // mottling, and the hot core keeps its own shape.
+      let stretch = vec3<f32>(1.0, 0.5, 1.0) / NOISE_PERIOD;
+      let nA = textureSampleLevel(noise, rep, (g + textureSampleLevel(flowA, lin, q, 0.0).xyz) * stretch, 0.0);
+      let nB = textureSampleLevel(noise, rep, (g + textureSampleLevel(flowB, lin, q, 0.0).xyz) * stretch, 0.0);
       let n = mix(nB, nA, V.flowWeight) - vec4<f32>(0.5);
-      let gate = clamp(s.y, 0.0, 1.0);
+      let gate = smoothstep(0.15, 0.6, s.y) * (1.0 - 0.5 * smoothstep(1.2, 2.5, s.y));
       s = textureSampleLevel(sca, lin, q + n.xyz * 2.0 * V.detail * gate / P.size, 0.0);
       breakup = 1.0 + 1.2 * n.w * gate;
     }
+    // Where fuel is burning right now the flame is hottest and whitest; the burnt gas around it is dimmer and more
+    // orange, and the lean zone before soot forms burns blue, emitting without absorbing.
+    let reaction = smoothstep(1.0, 10.0, s.w);
     let light = textureSampleLevel(shade, lin, q, 0.0);
     let flameLight = lightHere.rgb * V.fireLight * V.fire;
     let sigmaSmoke = s.x * V.density;
@@ -184,7 +190,8 @@ fn march(frag: vec2<f32>) -> March {
     let sigma = sigmaSmoke + sigmaFire;
     let opacity = 1.0 - exp(-sigma * V.stepSize);
     let reach = transmittance * opacity / max(sigma, 1e-4);
-    m.fire += reach * sigmaFire * blackbody(s.y) * V.fire;
+    m.fire += reach * sigmaFire * blackbody(s.y + 0.5 * reaction) * (0.7 + 0.5 * reaction) * V.fire;
+    m.fire += transmittance * V.stepSize * V.blue * reaction * (1.0 - flame(s.y)) * BLUE_FLAME * V.fire;
     // Wrenninge octaves: each softer and weaker, standing in for light scattered more than once; the weights sum to
     // one so an unshadowed cell gets exactly the key.
     let key = (4.0 * phase.x * light.x + 2.0 * phase.y * sqrt(light.x) + phase.z * sqrt(sqrt(light.x))) / 7.0;

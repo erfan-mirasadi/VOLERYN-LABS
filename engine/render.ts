@@ -18,6 +18,7 @@ export type Camera = { eye: Vec3; target: Vec3; tanHalfFov: number };
 export type Frame = {
   camera: Camera;
   preset: Preset;
+  blue: number;
   time: number;
   // Counts rendered frames; it drives the per-frame jitter.
   index: number;
@@ -33,6 +34,7 @@ export type Frame = {
 type ViewParams = {
   camera: Camera;
   preset: Preset;
+  blue: number;
   time: number;
   width: number;
   height: number;
@@ -49,6 +51,7 @@ type ViewParams = {
 export type ExportSample = {
   camera: Camera;
   preset: Preset;
+  blue: number;
   time: number;
   // Which scalar volume to read: the current state or the loop blend.
   source: number;
@@ -152,7 +155,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   }
 
   const viewData = new Float32Array(VIEW_FLOATS);
-  function writeView({ camera, preset, time, width, height, jitter, frame, stepCells, maxSteps, sampleWeight, frameTime }: ViewParams) {
+  function writeView({ camera, preset, blue, time, width, height, jitter, frame, stepCells, maxSteps, sampleWeight, frameTime }: ViewParams) {
     const { forward, right, up } = cameraBasis(camera);
     // Flow A's weight is 0 the moment it resets and 1 when B does; B gets the rest.
     const flowWeight = 1 - Math.abs(1 - 2 * ((time / FLOW_PERIOD) % 1));
@@ -166,7 +169,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
       ...preset.tint, preset.glow,
       -jitter[0], -jitter[1], width, height,
       maxSteps, FIRE_LIGHT, frame, preset.fireDensity,
-      preset.detail, flowWeight, sampleWeight, 0,
+      preset.detail, flowWeight, sampleWeight, blue,
     ]);
     device.queue.writeBuffer(viewBuffer, 0, viewData);
   }
