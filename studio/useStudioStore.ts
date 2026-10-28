@@ -23,13 +23,13 @@ export const useStudioStore = create<StudioState>()((set, get) => ({
   engine: null,
   status: 'loading',
   presetId: PRESETS[0].id,
-  tweaks: { heat: 1, vorticity: PRESETS[0].vorticity, wind: 0 },
+  tweaks: { heat: 1, vorticity: PRESETS[0].vorticity, wind: 0, seed: 0 },
   backdrop: 'checker',
   setEngine: (engine, status) => set({ engine, status }),
   setPreset: (presetId) => {
     const preset = presetById(presetId);
     get().engine?.setPreset(preset);
-    set({ presetId, tweaks: { heat: 1, vorticity: preset.vorticity, wind: 0 } });
+    set({ presetId, tweaks: { heat: 1, vorticity: preset.vorticity, wind: 0, seed: get().tweaks.seed } });
   },
   setTweak: (key, value) => {
     get().engine?.setTweaks({ [key]: value });

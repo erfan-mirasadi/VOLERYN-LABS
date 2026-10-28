@@ -45,7 +45,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   const timer = new GpuTimer(device, hasTimestamps);
 
   let preset = initialPreset;
-  let tweaks: Tweaks = { heat: 1, vorticity: initialPreset.vorticity, wind: 0 };
+  let tweaks: Tweaks = { heat: 1, vorticity: initialPreset.vorticity, wind: 0, seed: 0 };
   let boxes: Box[] = initialPreset.objects?.map((box) => ({ ...box })) ?? [];
   let simTime = 0;
   let burstStart = 0;
@@ -96,6 +96,18 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     }
   }
 
+  // One simulation step of dt seconds; an explosion re-arms its charge every BURST_EVERY seconds.
+  function advance(pass: GPUComputePassEncoder, dt: number, slot = 0) {
+    if (preset.mode === 'explosion' && simTime - burstStart > BURST_EVERY) burstStart = simTime;
+    const age = simTime - burstStart;
+    const emitting = preset.mode !== 'explosion' || age < (preset.burst ?? 0);
+    const blast = preset.mode === 'explosion' ? (preset.blast ?? 0) * Math.exp(-age / BLAST_DECAY) : 0;
+    simulation.writeParams(slot, { preset, tweaks, boxes, time: simTime, dt, emitting, blast });
+    simulation.step(pass, slot);
+    simTime += dt;
+    stepCount++;
+  }
+
   function tick(now: number) {
     if (!running || !visible) {
       looping = false;
@@ -116,15 +128,8 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     const encoder = device.createCommandEncoder();
     const simulationPass = encoder.beginComputePass({ timestampWrites: timer.timestamps('simulation') });
     for (let n = 0; accumulator >= DT && n < 2; n++) {
-      if (preset.mode === 'explosion' && simTime - burstStart > BURST_EVERY) burstStart = simTime;
-      const age = simTime - burstStart;
-      const emitting = preset.mode !== 'explosion' || age < (preset.burst ?? 0);
-      const blast = preset.mode === 'explosion' ? (preset.blast ?? 0) * Math.exp(-age / BLAST_DECAY) : 0;
-      simulation.writeParams(preset, tweaks, boxes, simTime, emitting, blast, n);
-      simulation.step(simulationPass, n);
+      advance(simulationPass, DT, n);
       accumulator -= DT;
-      simTime += DT;
-      stepCount++;
     }
     simulationPass.end();
     const lightingPass = encoder.beginComputePass({ timestampWrites: timer.timestamps('lighting') });
@@ -221,7 +226,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     lost: onDeviceLost,
     setPreset(next: Preset) {
       preset = next;
-      tweaks = { ...tweaks, vorticity: next.vorticity };
+      tweaks = { heat: 1, vorticity: next.vorticity, wind: 0, seed: tweaks.seed };
       boxes = next.objects?.map((box) => ({ ...box })) ?? [];
       simulation.clear();
       renderer.resetHistory();

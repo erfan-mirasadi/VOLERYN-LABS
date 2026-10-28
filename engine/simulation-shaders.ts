@@ -23,7 +23,7 @@ struct Params {
   expansion: f32,
   blast: f32,
   ignite: f32,
-  pad1: f32,
+  seed: f32,
   pad2: f32,
   pad3: f32,
   objects: array<vec4<f32>, 8>,
@@ -60,6 +60,8 @@ fn dims() -> vec3<i32> { return vec3<i32>(P.size); }
 fn inside(c: vec3<i32>) -> bool { return all(c >= vec3<i32>(0)) && all(c < dims()); }
 fn clampc(c: vec3<i32>) -> vec3<i32> { return clamp(c, vec3<i32>(0), dims() - vec3<i32>(1)); }
 fn coord(p: vec3<f32>) -> vec3<f32> { return (p + vec3<f32>(0.5)) / P.size; }
+// Seed 0 shifts nothing, so the default look stays; any other seed moves the stirring and flicker noise elsewhere.
+fn seedShift() -> vec3<f32> { return vec3<f32>(fract(P.seed * 0.618034) * 97.0, 0.0, fract(P.seed * 0.754878) * 89.0); }
 fn hash3(p: vec3<f32>) -> f32 { return fract(sin(dot(p, vec3<f32>(127.1, 311.7, 74.7))) * 43758.5453); }
 fn noise3(p: vec3<f32>) -> f32 {
   let i = floor(p);
@@ -196,7 +198,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   // Cool, slow burning makes more soot than a hot flame.
   let soot = burned * P.smokeYield * (1.0 + 3.0 * (1.0 - clamp(q.y, 0.0, 1.0)));
   q.x = (q.x + soot) * exp(-P.dissipation * P.dt);
-  let flicker = noise3(p * 0.3 + vec3<f32>(0.0, -P.time * 4.0, P.time * 1.3));
+  let flicker = noise3(p * 0.3 + vec3<f32>(0.0, -P.time * 4.0, P.time * 1.3) + seedShift());
   if (P.mode == 3.0) {
     // Solids give off fuel from a thin skin around them, so the flames take their shape.
     let sd = solidDistance(p);
@@ -300,7 +302,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   }
   v += P.dt * P.wind * (p.y / P.size.y);
   // Rising curl noise stirs the hot gas and the reaction sheet; being divergence-free it survives the projection.
-  let rise = vec3<f32>(0.0, -12.0 * P.time, 0.0);
+  let rise = vec3<f32>(0.0, -12.0 * P.time, 0.0) + seedShift();
   let stirring = textureSampleLevel(stir, rep, (p + rise) / 24.0, 0.0).xyz;
   v += P.dt * P.turbulence * stirring * clamp(s.y + 0.3 * s.x + 0.05 * s.w, 0.0, 1.5);
   let d = length(p - P.emitter) / P.radius;

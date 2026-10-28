@@ -7,6 +7,7 @@ const SLIDERS = [
   { key: 'heat', label: 'Heat', min: 0.5, max: 1.6, step: 0.01 },
   { key: 'vorticity', label: 'Vorticity', min: 0, max: 14, step: 0.1 },
   { key: 'wind', label: 'Wind', min: -60, max: 60, step: 1 },
+  { key: 'seed', label: 'Seed', min: 0, max: 99, step: 1 },
 ] as const;
 
 const BACKDROPS: { id: Backdrop; label: string }[] = [

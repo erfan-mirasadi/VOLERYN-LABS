@@ -3,7 +3,6 @@ import { createNoiseTextures, type NoiseTextures } from './noise-textures';
 import { createPressureSolver } from './pressure';
 import {
   type Box,
-  DT,
   GRID,
   LIGHT,
   LIGHT_BLUR_PASSES,
@@ -33,6 +32,8 @@ export type Volumes = {
   sampler: GPUSampler;
   noise: NoiseTextures;
 };
+
+export type StepParams = { preset: Preset; tweaks: Tweaks; boxes: Box[]; time: number; dt: number; emitting: boolean; blast: number };
 
 export type Simulation = ReturnType<typeof createSimulation>;
 
@@ -117,20 +118,20 @@ export function createSimulation(device: GPUDevice) {
   let sc = 0;
   const paramData = new Float32Array(PARAM_FLOATS);
 
-  function writeParams(preset: Preset, tweaks: Tweaks, boxes: Box[], time: number, emitting: boolean, blast: number, slot: number) {
+  function writeParams(slot: number, { preset, tweaks, boxes, time, dt, emitting, blast }: StepParams) {
     const boxData = Array.from({ length: MAX_BOXES }, (_, i) => {
       const box = boxes[i];
       return box ? [box.x, box.y, box.z, box.yaw, box.hx, box.hy, box.hz, 1] : [0, 0, 0, 0, 0, 0, 0, 0];
     }).flat();
     paramData.set([
-      ...GRID, DT,
+      ...GRID, dt,
       time, preset.buoyancy * tweaks.heat, preset.cooling, tweaks.vorticity,
       tweaks.wind, 0, 0, preset.burn,
       ...preset.emitter, preset.radius,
       emitting ? preset.emit : 0, preset.smokeYield, preset.heat * tweaks.heat, preset.dissipation,
       ...LIGHT, MODE_INDEX[preset.mode],
       preset.turbulence, preset.damping, preset.expansion, blast,
-      preset.ignite, 0, 0, 0,
+      preset.ignite, tweaks.seed, 0, 0,
       ...boxData,
     ]);
     device.queue.writeBuffer(paramSlots[slot], 0, paramData);
