@@ -249,7 +249,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     lost: onDeviceLost,
     setPreset(next: Preset) {
       preset = next;
-      tweaks = { ...tweaks, vorticity: next.vorticity };
+      tweaks = { heat: 1, vorticity: next.vorticity, wind: 0 };
       boxes = next.objects?.map((box) => ({ ...box })) ?? [];
       simulation.clear();
       renderer.resetHistory();
