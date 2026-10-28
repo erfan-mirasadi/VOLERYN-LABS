@@ -238,7 +238,7 @@ struct ExportOut {
 fn fsExport(@builtin(position) frag: vec4<f32>) -> ExportOut {
   let m = march(frag.xy);
   var data = vec4<f32>(0.0);
-  if (m.seen > 0.02) {
+  if (m.seen > 1e-3) {
     let p = V.camPos + m.dir * m.depth;
     data = vec4<f32>(toPixel(p + m.velocity * V.frameTime) - toPixel(p), m.depth * dot(m.dir, V.forward), 1.0);
   }
