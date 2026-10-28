@@ -203,7 +203,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (sd < 0.0) {
       q = vec4<f32>(0.0);
     } else if (sd < 2.5) {
-      let amount = (1.0 - sd / 2.5) * (0.35 + 1.3 * flicker) * P.emit * P.dt;
+      // Upper faces burn, undersides smoulder, and hot spots wander slowly along the log.
+      let up = solidDistance(p + vec3<f32>(0.0, 0.75, 0.0)) - solidDistance(p - vec3<f32>(0.0, 0.75, 0.0));
+      let spot = noise3(p * 0.5 + vec3<f32>(0.0, P.time * 0.3, 0.0));
+      let skin = (0.25 + 0.75 * smoothstep(-0.5, 1.0, up)) * (0.4 + 0.6 * spot);
+      let amount = (1.0 - sd / 2.5) * (0.35 + 1.3 * flicker) * P.emit * P.dt * skin;
       q.z += amount;
       q.y += amount * 0.25;
     }

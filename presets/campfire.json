@@ -8,7 +8,7 @@
   "heat": 1,
   "smokeYield": 0.18,
   "dissipation": 0.8,
-  "emit": 8,
+  "emit": 7,
   "radius": 1,
   "emitter": [0, -100, 0],
   "vorticity": 3,
@@ -17,7 +17,7 @@
   "expansion": 0.02,
   "tint": [0.2, 0.19, 0.18],
   "glow": 0.8,
-  "fireDensity": 24,
+  "fireDensity": 20,
   "ignite": 0.3,
   "detail": 1.5,
   "objects": [
