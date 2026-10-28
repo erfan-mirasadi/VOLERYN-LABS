@@ -1,5 +1,5 @@
 import { COMPOSITE, DISPLAY, RENDER, RESOLVE } from './render-shaders';
-import { DENSITY, EXPOSURE, FIRE_LIGHT, FLOW_PERIOD, GRID, type Preset } from './scene';
+import { BOX_MAX, BOX_MIN, DENSITY, EXPOSURE, FIRE_LIGHT, FLOW_PERIOD, GRID, type Preset } from './scene';
 import type { Volumes } from './simulation';
 
 const VIEW_FLOATS = 40;
@@ -10,8 +10,6 @@ const LIVE_MAX_STEPS = 160;
 export const EXPORT_STEP_CELLS = 0.75;
 const EXPORT_MAX_STEPS = 320;
 const ADD: GPUBlendComponent = { srcFactor: 'one', dstFactor: 'one', operation: 'add' };
-export const BOX_MIN: Vec3 = [-0.5, 0, (-0.5 * GRID[2]) / GRID[0]];
-export const BOX_MAX: Vec3 = [0.5, GRID[1] / GRID[0], (0.5 * GRID[2]) / GRID[0]];
 
 export type Vec3 = [number, number, number];
 

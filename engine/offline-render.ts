@@ -1,5 +1,5 @@
-import { BOX_MAX, BOX_MIN, type Camera, cameraBasis, type Renderer, type Vec3 } from './render';
-import type { Preset } from './scene';
+import { type Camera, cameraBasis, type Renderer, type Vec3 } from './render';
+import { BOX_MAX, BOX_MIN, type Preset } from './scene';
 import { LOOP_SOURCE, type Simulation } from './simulation';
 
 const MAX_OVERLAP = 32;

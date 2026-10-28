@@ -15,7 +15,11 @@ export const KEY_STRENGTH = 0.7;
 export const SKY_COLOR = [0.2, 0.23, 0.32];
 export const GROUND_COLOR = [0.08, 0.07, 0.06];
 export const MAX_BOXES = 4;
-// How fast an explosion's blast fades after the charge goes off, in seconds.
+// The simulation box in world units: a cell is 1/GRID[0] wide and the floor sits at y = 0.
+export const BOX_MIN = [-0.5, 0, (-0.5 * GRID[2]) / GRID[0]] as const;
+export const BOX_MAX = [0.5, GRID[1] / GRID[0], (0.5 * GRID[2]) / GRID[0]] as const;
+// Explosions go off this often, and their blast fades this fast after the charge goes off, in seconds.
+export const BURST_EVERY = 5;
 export const BLAST_DECAY = 0.08;
 // The flame's sub-cell detail: cells per noise tile, and how often each of the two flow fields that carry it resets.
 export const NOISE_PERIOD = 8;
