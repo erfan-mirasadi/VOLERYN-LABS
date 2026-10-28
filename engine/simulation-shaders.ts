@@ -349,14 +349,24 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (any(id >= n)) { return; }
   let box = vec3<f32>(1.0, P.size.y / P.size.x, P.size.z / P.size.x);
   let march = P.lightDir * 0.03 / box;
-  var q = (vec3<f32>(id) + vec3<f32>(0.5)) / vec3<f32>(n);
+  let start = (vec3<f32>(id) + vec3<f32>(0.5)) / vec3<f32>(n);
+  var q = start;
   var depth = 0.0;
   for (var i = 0; i < 64; i++) {
     q += march;
     if (any(q < vec3<f32>(0.0)) || any(q > vec3<f32>(1.0))) { break; }
     depth += textureSampleLevel(sca, lin, q, 0.0).x;
   }
-  textureStore(dst, vec3<i32>(id), vec4<f32>(exp(-depth * 0.03 * ${DENSITY.toFixed(1)}), 0.0, 0.0, 1.0));
+  // A second march straight up: how much of the sky each cell still sees.
+  var up = start;
+  var depthUp = 0.0;
+  for (var i = 0; i < 64; i++) {
+    up.y += 0.03 / box.y;
+    if (up.y > 1.0) { break; }
+    depthUp += textureSampleLevel(sca, lin, up, 0.0).x;
+  }
+  let scale = 0.03 * ${DENSITY.toFixed(1)};
+  textureStore(dst, vec3<i32>(id), vec4<f32>(exp(-depth * scale), exp(-depthUp * scale), 0.0, 1.0));
 }`,
 };
 

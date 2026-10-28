@@ -1,6 +1,13 @@
+import { GROUND_COLOR, KEY_COLOR, KEY_STRENGTH, SKY_COLOR } from './scene';
 import { BLACKBODY, PARAMS_STRUCT, SOLIDS } from './simulation-shaders';
 
+const vec3 = (v: number[]) => `vec3<f32>(${v.map((x) => x.toFixed(3)).join(', ')})`;
+
 export const RENDER = BLACKBODY + /* wgsl */ `
+const KEY_COLOR = ${vec3(KEY_COLOR)};
+const KEY_STRENGTH = ${KEY_STRENGTH.toFixed(3)};
+const SKY_COLOR = ${vec3(SKY_COLOR)};
+const GROUND_COLOR = ${vec3(GROUND_COLOR)};
 struct View {
   camPos: vec3<f32>,
   tanHalf: f32,
@@ -51,6 +58,10 @@ fn jitter(p: vec2<f32>, frame: f32) -> f32 {
   return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y) + frame * 0.618034);
 }
 
+// Henyey-Greenstein with the 4 pi folded in, so g = 0 gives 1; smoke scatters mostly forward with a little back.
+fn hg(mu: f32, g: f32) -> f32 { return (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * mu, 1.5); }
+fn dualLobe(mu: f32, k: f32) -> f32 { return 0.8 * hg(mu, 0.55 * k) + 0.2 * hg(mu, -0.25 * k); }
+
 @fragment
 fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let local = (frag.xy - V.viewport.xy) / V.viewport.zw;
@@ -71,6 +82,9 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   var depthSum = 0.0;
   var weightSum = 0.0;
   var hottest = 0.0;
+  // lightDir points at the light, so mu = 1 looks straight into it: backlit smoke gets the bright forward lobe.
+  let mu = dot(dir, P.lightDir);
+  let phase = vec3<f32>(dualLobe(mu, 1.0), dualLobe(mu, 0.5), dualLobe(mu, 0.25));
   for (var i = 0; i < 160; i++) {
     if (t > tFar || transmittance < 0.01) { break; }
     let q = (V.camPos + dir * t - V.boxMin) / size;
@@ -93,7 +107,8 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
           solidDistance(gh + vec3<f32>(e, 0.0, 0.0)) - solidDistance(gh - vec3<f32>(e, 0.0, 0.0)),
           solidDistance(gh + vec3<f32>(0.0, e, 0.0)) - solidDistance(gh - vec3<f32>(0.0, e, 0.0)),
           solidDistance(gh + vec3<f32>(0.0, 0.0, e)) - solidDistance(gh - vec3<f32>(0.0, 0.0, e))));
-        let lit = max(dot(n, P.lightDir), 0.0) * textureSampleLevel(shade, lin, qh, 0.0).x + 0.18;
+        let shadeHere = textureSampleLevel(shade, lin, qh, 0.0);
+        let lit = KEY_STRENGTH * KEY_COLOR * max(dot(n, P.lightDir), 0.0) * shadeHere.x + mix(GROUND_COLOR, SKY_COLOR, shadeHere.y);
         let surface = textureSampleLevel(sca, lin, qh + n * 2.0 / P.size, 0.0);
         let flameLight = textureSampleLevel(glow, lin, qh, 0.0).rgb * V.fireLight * V.fire;
         let ember = blackbody(surface.y) * smoothstep(1.0, 6.0, surface.w) * 0.25 * V.fire;
@@ -120,7 +135,10 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let opacity = 1.0 - exp(-sigma * V.stepSize);
     let reach = transmittance * opacity / max(sigma, 1e-4);
     fire += reach * sigmaFire * blackbody(s.y) * V.fire;
-    smoke += reach * sigmaSmoke * V.smokeTint * (0.85 * light.x + 0.12 + flameLight);
+    // Wrenninge octaves: each softer and weaker, standing in for light scattered more than once.
+    let key = phase.x * light.x + 0.5 * phase.y * sqrt(light.x) + 0.25 * phase.z * sqrt(sqrt(light.x));
+    let ambient = mix(GROUND_COLOR, SKY_COLOR, light.y);
+    smoke += reach * sigmaSmoke * V.smokeTint * (KEY_STRENGTH * KEY_COLOR * key + ambient + flameLight);
     depthSum += transmittance * opacity * t;
     weightSum += transmittance * opacity;
     hottest = max(hottest, s.y);

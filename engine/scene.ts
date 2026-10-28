@@ -9,6 +9,11 @@ export const DT = 1 / 60;
 export const DENSITY = 14;
 export const EXPOSURE = 1.0;
 export const LIGHT = normalize([-0.45, 0.8, 0.4]);
+// The key light and the sky and ground that light the smoke from above and below.
+export const KEY_COLOR = [1.0, 0.95, 0.88];
+export const KEY_STRENGTH = 0.6;
+export const SKY_COLOR = [0.2, 0.23, 0.32];
+export const GROUND_COLOR = [0.08, 0.07, 0.06];
 export const MAX_BOXES = 4;
 // How fast an explosion's blast fades after the charge goes off, in seconds.
 export const BLAST_DECAY = 0.08;
