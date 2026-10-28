@@ -48,14 +48,14 @@ export default function ExportPanel() {
 
   async function render() {
     if (!engine) return;
-    // The picker needs the click's user activation, so nothing may await before it.
-    const destination = await openDestination(folderName(presetId, tweaks.seed));
-    if (!destination) return;
     const controller = new AbortController();
     abort.current = controller;
     setMessage(null);
-    setExporting(true);
     try {
+      // The picker needs the click's user activation, so nothing may await before it.
+      const destination = await openDestination(folderName(presetId, tweaks.seed));
+      if (!destination) return;
+      setExporting(true);
       await runExport(engine, settings, destination, setProgress, controller.signal);
       setMessage(`Saved ${destination.name}`);
     } catch (error) {
@@ -75,7 +75,7 @@ export default function ExportPanel() {
             key={mode}
             type="button"
             disabled={exporting}
-            onClick={() => set(mode === 'flipbook' ? { mode, loop: true } : { mode })}
+            onClick={() => set({ mode, loop: mode === 'flipbook' })}
             aria-pressed={mode === settings.mode}
             className={chip(mode === settings.mode)}
           >
