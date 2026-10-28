@@ -23,7 +23,7 @@ const KEY_STRENGTH = ${KEY_STRENGTH.toFixed(3)};
 const SKY_COLOR = ${vec3(SKY_COLOR)};
 const GROUND_COLOR = ${vec3(GROUND_COLOR)};
 const NOISE_PERIOD = ${NOISE_PERIOD.toFixed(1)};
-const BLUE_FLAME = vec3<f32>(1.5, 3.6, 12.0);
+const BLUE_FLAME = vec3<f32>(1.2, 2.8, 10.0);
 const ALBEDO = vec3<f32>(0.03, 0.025, 0.02);
 struct View {
   camPos: vec3<f32>,
@@ -181,17 +181,20 @@ fn march(frag: vec2<f32>) -> March {
       breakup = 1.0 + 1.2 * n.w * gate;
     }
     // Where fuel is burning right now the flame is hottest and whitest; the burnt gas around it is dimmer and more
-    // orange, and the lean zone before soot forms burns blue, emitting without absorbing.
+    // orange. Fuel burns lean and blue where it enters, along the floor of the emitter or the skin of a solid, and
+    // that layer glows blue through almost no soot; above it the soot takes over and the flame goes yellow.
     let reaction = smoothstep(1.0, 10.0, s.w);
+    let fresh = select(1.0 - smoothstep(0.0, 0.6 * P.radius, g.y - max(P.emitter.y - P.radius, 0.0)), 1.0 - smoothstep(1.0, 3.0, sd), P.mode == 3.0);
+    let lean = min(2.0 * V.blue, 1.0) * reaction * fresh;
     let light = textureSampleLevel(shade, lin, q, 0.0);
     let flameLight = lightHere.rgb * V.fireLight * V.fire;
     let sigmaSmoke = s.x * V.density;
-    let sigmaFire = V.fireDensity * flame(s.y) * breakup;
+    let sigmaFire = V.fireDensity * flame(s.y) * breakup * (1.0 - 0.9 * lean);
     let sigma = sigmaSmoke + sigmaFire;
     let opacity = 1.0 - exp(-sigma * V.stepSize);
     let reach = transmittance * opacity / max(sigma, 1e-4);
     m.fire += reach * sigmaFire * blackbody(s.y + 0.5 * reaction) * (0.7 + 0.5 * reaction) * V.fire;
-    m.fire += transmittance * V.stepSize * V.blue * reaction * (1.0 - flame(s.y)) * BLUE_FLAME * V.fire;
+    m.fire += transmittance * V.stepSize * lean * BLUE_FLAME * V.fire;
     // Wrenninge octaves: each softer and weaker, standing in for light scattered more than once; the weights sum to
     // one so an unshadowed cell gets exactly the key.
     let key = (4.0 * phase.x * light.x + 2.0 * phase.y * sqrt(light.x) + phase.z * sqrt(sqrt(light.x))) / 7.0;

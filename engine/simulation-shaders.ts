@@ -408,7 +408,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 // flame() is how much of the hot gas is glowing soot: it emits where it absorbs.
 export const BLACKBODY = /* wgsl */ `
 fn blackbody(t: f32) -> vec3<f32> {
-  let k = clamp(10.0 + 9.0 * t, 10.0, 26.0);
+  let k = clamp(10.0 + 6.0 * t, 10.0, 26.0);
   let g = clamp((99.4708 * log(k) - 161.1196) / 255.0, 0.0, 1.0);
   let b = select(clamp((138.5177 * log(max(k - 10.0, 1.0)) - 305.0448) / 255.0, 0.0, 1.0), 0.0, k <= 19.0);
   return pow(vec3<f32>(1.0, g, b), vec3<f32>(2.2)) * pow(k / 15.0, 2.5);
