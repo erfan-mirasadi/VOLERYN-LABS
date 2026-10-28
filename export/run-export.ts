@@ -4,6 +4,7 @@ import { EXPORT_STEP_CELLS } from '@/engine/render';
 import { encodeExr } from './exr';
 import type { Destination } from './files';
 import { createSheet, MOTION_RANGE } from './flipbook';
+import { createMp4Sink } from './mp4';
 import { cameraMatrices, toExrChannels, toRgba } from './planes';
 import { encodeJson, encodePng } from './png';
 
@@ -118,9 +119,11 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
   };
   const sink = flipbook
     ? flipbookSink(destination, preset.id, settings, cols, rows)
-    : exr
-      ? exrSink(destination, preset.id, job, JSON.stringify(sidecar))
-      : pngSink(destination, preset.id, settings);
+    : settings.mode === 'video'
+      ? await videoSink(destination, preset.id, job)
+      : exr
+        ? exrSink(destination, preset.id, job, JSON.stringify(sidecar))
+        : pngSink(destination, preset.id, settings);
   const started = performance.now();
   try {
     await engine.render(
@@ -149,6 +152,7 @@ function outputNotes(settings: ExportSettings, exr: boolean) {
       colour: 'scene-linear Rec.709/D65, premultiplied; RGB = fire + firelight + smoke; Z planar camera depth, far 1e10; forward.u/v pixels per frame, +v up; temperature in simulation units',
     };
   }
+  if (settings.mode === 'video') return { mode: 'video', format: 'mp4', colour: 'H.264 4:2:0 of the sRGB display image over black' };
   return {
     mode: settings.mode,
     format: 'png',
@@ -174,6 +178,12 @@ function exrSink(destination: Destination, id: string, job: OfflineJob, comments
     frame: async (frame) => destination.write(frameName(id, frame.index, 'exr'), await encodeExr(frame.width, frame.height, toExrChannels(frame), meta)),
     finish: async () => {},
   };
+}
+
+// The premultiplied display colour is the picture over black, so the alpha byte is simply ignored.
+async function videoSink(destination: Destination, id: string, job: OfflineJob): Promise<Sink> {
+  const mp4 = await createMp4Sink(destination, `${id}.mp4`, job.width, job.height, job.fps);
+  return { frame: (frame) => mp4.frame(toRgba(frame, 8, false), frame.index), finish: mp4.finish, abort: mp4.abort };
 }
 
 function flipbookSink(destination: Destination, id: string, settings: ExportSettings, cols: number, rows: number): Sink {

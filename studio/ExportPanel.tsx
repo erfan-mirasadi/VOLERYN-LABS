@@ -16,7 +16,7 @@ type Row = {
   hidden?: (settings: ExportSettings) => boolean;
 };
 
-const MODES: [Mode, string][] = [['sequence', 'Sequence'], ['flipbook', 'Flipbook']];
+const MODES: [Mode, string][] = [['sequence', 'Sequence'], ['flipbook', 'Flipbook'], ['video', 'Video']];
 const ALL: Mode[] = ['sequence', 'flipbook', 'video'];
 const ROWS: Row[] = [
   { key: 'format', label: 'Format', options: [['png', 'PNG'], ['exr', 'EXR']], modes: ['sequence'] },
