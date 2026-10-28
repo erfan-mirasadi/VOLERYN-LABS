@@ -16,7 +16,7 @@ import {
 } from './scene';
 import { CLEAR, EMISSION, HEADER, LIGHT_BLUR, SHADERS } from './simulation-shaders';
 
-const PARAM_FLOATS = 60;
+const PARAM_FLOATS = 64;
 // The residual readback skips the sponge under the lid, where the open top is only approximate.
 const LIVE_HEIGHT = Math.floor(GRID[1] * 0.8);
 const ROW_BYTES = Math.ceil((GRID[0] * 4) / 256) * 256;
@@ -115,6 +115,7 @@ export function createSimulation(device: GPUDevice) {
       emitting ? preset.emit : 0, preset.smokeYield, preset.heat * tweaks.heat, preset.dissipation,
       ...LIGHT, MODE_INDEX[preset.mode],
       preset.turbulence, preset.damping, preset.expansion, 0,
+      preset.ignite, 0, 0, 0,
       ...boxData,
     ]);
     device.queue.writeBuffer(params, 0, paramData);

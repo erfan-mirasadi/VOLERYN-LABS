@@ -23,6 +23,8 @@ export type Preset = {
   buoyancy: number;
   cooling: number;
   burn: number;
+  // Fuel only burns where the gas is at least this hot.
+  ignite: number;
   heat: number;
   smokeYield: number;
   dissipation: number;

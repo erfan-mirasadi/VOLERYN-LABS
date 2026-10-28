@@ -17,5 +17,6 @@
   "expansion": 0.08,
   "tint": [0.3, 0.28, 0.27],
   "glow": 0.8,
-  "fireDensity": 30
+  "fireDensity": 30,
+  "ignite": 0.35
 }

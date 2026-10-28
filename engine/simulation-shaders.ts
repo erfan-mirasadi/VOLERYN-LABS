@@ -21,7 +21,11 @@ struct Params {
   turbulence: f32,
   damping: f32,
   expansion: f32,
-  pad1: f32,
+  blast: f32,
+  ignite: f32,
+  flowReset: f32,
+  pad2: f32,
+  pad3: f32,
   objects: array<vec4<f32>, 8>,
 }
 `;
@@ -182,13 +186,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     hi = max(hi, s);
   }
   q = clamp(q, lo, hi);
-  // Fuel burns into heat and soot; heat and soot then fade.
-  let burned = q.z * (1.0 - exp(-P.burn * P.dt));
+  // Fuel burns where the gas is hot enough to ignite, into heat and soot; heat and soot then fade.
+  let rate = P.burn * smoothstep(P.ignite, P.ignite + 0.25, q.y);
+  let burned = q.z * (1.0 - exp(-rate * P.dt));
   q.z -= burned;
   // The burn rate rides in w so the pressure solve can let burning gas expand.
   q.w = burned / P.dt;
   q.y = (q.y + burned * P.heat) * exp(-P.cooling * P.dt);
-  q.x = (q.x + burned * P.smokeYield) * exp(-P.dissipation * P.dt);
+  // Cool, slow burning makes more soot than a hot flame.
+  let soot = burned * P.smokeYield * (1.0 + 3.0 * (1.0 - clamp(q.y, 0.0, 1.0)));
+  q.x = (q.x + soot) * exp(-P.dissipation * P.dt);
   let flicker = noise3(p * 0.3 + vec3<f32>(0.0, -P.time * 4.0, P.time * 1.3));
   if (P.mode == 3.0) {
     // Solids give off fuel from a thin skin around them, so the flames take their shape.
@@ -211,7 +218,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         q.y += amount * 0.5;
       } else {
         q.z += amount;
-        q.y += amount * 0.25;
+        // An explosion's charge goes in at full heat so it flashes from its first frame.
+        q.y += amount * select(0.25, P.heat, P.mode == 2.0);
       }
     }
   }
