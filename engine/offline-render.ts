@@ -106,18 +106,18 @@ export async function fitToContent(render: (job: OfflineJob, onFrame: (frame: Re
   const aspect = job.width / job.height;
   // Pixel bounds, padded by one probe pixel, as offsets from the view axis in tangent units.
   const edge = (pixel: number) => Math.min(1, Math.max(-1, (pixel / n) * 2 - 1));
-  const left = edge(x0 - 1) * tanHalfFov * aspect;
-  const rightEdge = edge(x1 + 2) * tanHalfFov * aspect;
-  const top = -edge(y0 - 1) * tanHalfFov;
-  const bottom = -edge(y1 + 2) * tanHalfFov;
-  const cx = (left + rightEdge) / 2;
-  const cy = (top + bottom) / 2;
+  const xMin = edge(x0 - 1) * tanHalfFov * aspect;
+  const xMax = edge(x1 + 2) * tanHalfFov * aspect;
+  const yMin = -edge(y1 + 2) * tanHalfFov;
+  const yMax = -edge(y0 - 1) * tanHalfFov;
+  const cx = (xMin + xMax) / 2;
+  const cy = (yMin + yMax) / 2;
   const dir = unit([forward[0] + cx * right[0] + cy * up[0], forward[1] + cx * right[1] + cy * up[1], forward[2] + cx * right[2] + cy * up[2]]);
   const distance = Math.hypot(target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]);
   return {
     eye,
     target: [eye[0] + dir[0] * distance, eye[1] + dir[1] * distance, eye[2] + dir[2] * distance],
-    tanHalfFov: Math.max((rightEdge - left) / 2 / aspect, (top - bottom) / 2) / margin,
+    tanHalfFov: Math.max((xMax - xMin) / 2 / aspect, (yMax - yMin) / 2) / margin,
   };
 }
 
