@@ -1,5 +1,5 @@
 import type { Engine } from '@/engine/engine';
-import { fitCamera, type Fps, loopOverlap, type OfflineJob, type RenderedFrame, substepsFor } from '@/engine/offline-render';
+import { fitCamera, fitToContent, type Fps, loopOverlap, type OfflineJob, type RenderedFrame, substepsFor } from '@/engine/offline-render';
 import { EXPORT_STEP_CELLS } from '@/engine/render';
 import { encodeExr } from './exr';
 import type { Destination } from './files';
@@ -64,77 +64,25 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
   const [cols, rows] = settings.grid.split('x').map(Number);
   const [width, height] = flipbook ? [settings.cell, settings.cell] : settings.size.split('x').map(Number);
   const cells = cols * rows;
-  const stride = flipbook ? Math.ceil((settings.seconds * FLIPBOOK_FPS) / cells) : 1;
   const job: OfflineJob = {
     width,
     height,
     fps: flipbook ? FLIPBOOK_FPS : settings.fps,
     frames: flipbook ? cells : settings.seconds * settings.fps,
-    stride,
+    stride: flipbook ? Math.ceil((settings.seconds * FLIPBOOK_FPS) / cells) : 1,
     warmup: explosion ? 0 : WARMUP,
     samples: settings.samples,
     camera: flipbook ? fitCamera(snapshot.camera.eye, FLIPBOOK_FOV) : snapshot.camera,
     loop: settings.loop && !explosion,
     read: exr ? ['fire', 'firelight', 'smoke', 'data'] : flipbook && settings.motion !== 'off' ? ['display', 'data'] : ['display'],
   };
-  const overlap = job.loop ? loopOverlap(job.frames) : 0;
-  const sidecar = {
-    app: 'Voleryn Labs',
-    version: 1,
-    preset,
-    tweaks: snapshot.tweaks,
-    boxes: snapshot.boxes,
-    camera: { ...job.camera, orbit: snapshot.orbit },
-    render: {
-      width: job.width,
-      height: job.height,
-      fps: job.fps,
-      frames: job.frames,
-      stride,
-      first: 1,
-      warmup: job.warmup,
-      substeps: substepsFor(job.fps),
-      dt: 1 / (job.fps * substepsFor(job.fps)),
-      samples: job.samples,
-      stepCells: EXPORT_STEP_CELLS,
-      loop: {
-        overlap,
-        method: 'field-space crossfade',
-        ...(overlap > 0 && { note: 'during the crossfade the flame detail phase and the motion vectors follow the live state, not the blend' }),
-      },
-    },
-    output: outputNotes(settings, exr),
-    ...(flipbook && {
-      flipbook: {
-        cols,
-        rows,
-        frames: job.frames,
-        fps: job.fps / stride,
-        seconds: (job.frames * stride) / job.fps,
-        stride,
-        cell: settings.cell,
-        order: 'row-major from top-left',
-        alpha: settings.alpha,
-        lens: FLIPBOOK_FOV,
-        framing: 'the domain\'s inscribed cylinder with an 8% margin, from the live orbit direction',
-        ...(settings.motion !== 'off' && {
-          motion: {
-            file: `${preset.id}-motion.png`,
-            engine: settings.motion,
-            range: MOTION_RANGE,
-            decode: `uv = (rg - 0.5) * 2 * ${MOTION_RANGE} per frame`,
-            vAxis: settings.motion === 'unity' ? 'up' : 'down',
-            neutral: 128,
-          },
-        }),
-      },
-    }),
-  };
   onProgress({ done: 0, total: job.frames, msPerFrame: 0 });
   // The clock starts at the first delivered frame, so the warm-up does not inflate the estimate.
   let started = 0;
   let active: Sink | undefined;
   try {
+    if (flipbook) job.camera = await fitToContent((probe, onFrame) => engine.render(probe, onFrame, signal), job);
+    const sidecar = sidecarFor(snapshot, settings, job);
     const sink = flipbook
       ? flipbookSink(destination, preset.id, settings, cols, rows)
       : settings.mode === 'video'
@@ -160,6 +108,66 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
     await destination.discard();
     throw error;
   }
+}
+
+// Every input the job had, so the same frames can be rendered again.
+function sidecarFor({ preset, tweaks, boxes, orbit }: ReturnType<Engine['snapshot']>, settings: ExportSettings, job: OfflineJob) {
+  const exr = settings.mode === 'sequence' && settings.format === 'exr';
+  const flipbook = settings.mode === 'flipbook';
+  const [cols, rows] = settings.grid.split('x').map(Number);
+  const overlap = job.loop ? loopOverlap(job.frames) : 0;
+  return {
+    app: 'Voleryn Labs',
+    version: 1,
+    preset,
+    tweaks,
+    boxes,
+    camera: { ...job.camera, orbit },
+    render: {
+      width: job.width,
+      height: job.height,
+      fps: job.fps,
+      frames: job.frames,
+      stride: job.stride,
+      first: 1,
+      warmup: job.warmup,
+      substeps: substepsFor(job.fps),
+      dt: 1 / (job.fps * substepsFor(job.fps)),
+      samples: job.samples,
+      stepCells: EXPORT_STEP_CELLS,
+      loop: {
+        overlap,
+        method: 'field-space crossfade',
+        ...(overlap > 0 && { note: 'during the crossfade the flame detail phase and the motion vectors follow the live state, not the blend' }),
+      },
+    },
+    output: outputNotes(settings, exr),
+    ...(flipbook && {
+      flipbook: {
+        cols,
+        rows,
+        frames: job.frames,
+        fps: job.fps / job.stride,
+        seconds: (job.frames * job.stride) / job.fps,
+        stride: job.stride,
+        cell: settings.cell,
+        order: 'row-major from top-left',
+        alpha: settings.alpha,
+        lens: (2 * Math.atan(job.camera.tanHalfFov) * 180) / Math.PI,
+        framing: 'fitted to the clip\'s content with an 8% margin, from the live orbit direction',
+        ...(settings.motion !== 'off' && {
+          motion: {
+            file: `${preset.id}-motion.png`,
+            engine: settings.motion,
+            range: MOTION_RANGE,
+            decode: `uv = (rg - 0.5) * 2 * ${MOTION_RANGE} per frame`,
+            vAxis: settings.motion === 'unity' ? 'up' : 'down',
+            neutral: 128,
+          },
+        }),
+      },
+    }),
+  };
 }
 
 function outputNotes(settings: ExportSettings, exr: boolean) {

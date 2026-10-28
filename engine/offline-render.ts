@@ -1,9 +1,12 @@
-import { type Camera, cameraBasis, type Renderer, type Vec3 } from './render';
+import { type Camera, cameraBasis, type Renderer, unit, type Vec3 } from './render';
 import { BOX_MAX, BOX_MIN, type Preset } from './scene';
 import { LOOP_SOURCE, type Simulation } from './simulation';
 
 const MAX_OVERLAP = 32;
 const RIM_SAMPLES = 64;
+// The content probe's frame size and, as raw half bits, the alpha a pixel needs to count as content.
+const PROBE_SIZE = 64;
+const PROBE_ALPHA = new Uint16Array(new Float16Array([0.01]).buffer)[0];
 // One staging slot above this size is enough: two would hold a quarter gigabyte for a 4K EXR.
 const SINGLE_SLOT_BYTES = 128 * 2 ** 20;
 
@@ -75,6 +78,47 @@ export function fitCamera(eye: Vec3, fovDegrees = 20, margin = 0.92): Camera {
     }
   }
   return { eye: centre.map((c, i) => c - forward[i] * distance) as Vec3, target: centre, tanHalfFov: t };
+}
+
+// Narrows a fitted lens onto what the clip actually shows: a small draft of the same job finds the alpha extents over
+// every frame, then the eye stays put while the view turns to their centre and zooms to them with the margin.
+export async function fitToContent(render: (job: OfflineJob, onFrame: (frame: RenderedFrame) => Promise<void>) => Promise<void>, job: OfflineJob, margin = 0.92): Promise<Camera> {
+  const n = PROBE_SIZE;
+  let x0 = n;
+  let x1 = -1;
+  let y0 = n;
+  let y1 = -1;
+  await render({ ...job, width: n, height: n, samples: 1, read: ['display'] }, async ({ planes, stride }) => {
+    const display = planes.display!;
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        if (display[y * stride + 4 * x + 3] < PROBE_ALPHA) continue;
+        x0 = Math.min(x0, x);
+        x1 = Math.max(x1, x);
+        y0 = Math.min(y0, y);
+        y1 = Math.max(y1, y);
+      }
+    }
+  });
+  if (x1 < 0) return job.camera;
+  const { eye, target, tanHalfFov } = job.camera;
+  const { forward, right, up } = cameraBasis(job.camera);
+  const aspect = job.width / job.height;
+  // Pixel bounds, padded by one probe pixel, as offsets from the view axis in tangent units.
+  const edge = (pixel: number) => Math.min(1, Math.max(-1, (pixel / n) * 2 - 1));
+  const left = edge(x0 - 1) * tanHalfFov * aspect;
+  const rightEdge = edge(x1 + 2) * tanHalfFov * aspect;
+  const top = -edge(y0 - 1) * tanHalfFov;
+  const bottom = -edge(y1 + 2) * tanHalfFov;
+  const cx = (left + rightEdge) / 2;
+  const cy = (top + bottom) / 2;
+  const dir = unit([forward[0] + cx * right[0] + cy * up[0], forward[1] + cx * right[1] + cy * up[1], forward[2] + cx * right[2] + cy * up[2]]);
+  const distance = Math.hypot(target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]);
+  return {
+    eye,
+    target: [eye[0] + dir[0] * distance, eye[1] + dir[1] * distance, eye[2] + dir[2] * distance],
+    tanHalfFov: Math.max((rightEdge - left) / 2 / aspect, (top - bottom) / 2) / margin,
+  };
 }
 
 // Restarts nothing itself: the caller clears the simulation first. Every frame then takes the same substeps and

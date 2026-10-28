@@ -282,7 +282,7 @@ export function cameraBasis({ eye, target }: Camera) {
 }
 
 const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-const unit = (a: Vec3): Vec3 => {
+export const unit = (a: Vec3): Vec3 => {
   const length = Math.hypot(...a);
   return [a[0] / length, a[1] / length, a[2] / length];
 };
