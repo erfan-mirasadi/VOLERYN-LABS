@@ -240,12 +240,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(6) var lin: sampler;
 ${TRACE}
 // Two displacement fields ride the flow and take turns resetting to zero, so the detail noise the render looks up
-// through them travels with the gas and never stretches for more than a period.
+// through them travels with the gas and never stretches for more than a period. They live on half the grid.
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
-  if (!inside(c)) { return; }
-  let p = vec3<f32>(c);
+  if (any(c >= vec3<i32>(textureDimensions(dstA)))) { return; }
+  let p = 2.0 * vec3<f32>(c) + vec3<f32>(0.5);
   let back = trace(p, P.dt);
   let shift = back - p;
   let a = textureSampleLevel(srcA, lin, coord(back), 0.0).xyz + shift;

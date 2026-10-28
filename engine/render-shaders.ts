@@ -131,7 +131,7 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     }
     let lightHere = textureSampleLevel(glow, lin, q, 0.0);
     // Three steps are 4.5 cells, inside the occupancy's 8-cell margin and short of any solid the SDF reports.
-    if (lightHere.a < 0.004 && sd > 4.5) {
+    if (lightHere.a < 0.02 && sd > 4.5) {
       t += 3.0 * V.stepSize;
       continue;
     }

@@ -19,6 +19,7 @@ import {
 import { CLEAR, EMISSION, HEADER, LIGHT_BLUR, SHADERS } from './simulation-shaders';
 
 const PARAM_FLOATS = 64;
+const FLOW_GRID = GRID.map((n) => n / 2) as [number, number, number];
 // The residual readback skips the sponge under the lid, where the open top is only approximate.
 const LIVE_HEIGHT = Math.floor(GRID[1] * 0.8);
 const ROW_BYTES = Math.ceil((GRID[0] * 4) / 256) * 256;
@@ -46,7 +47,8 @@ export function createSimulation(device: GPUDevice) {
   // A spare volume: the MacCormack prediction, then the cell-centred forces.
   const scratch = volume('rgba16float');
   const scalars: [GPUTexture, GPUTexture] = [volume('rgba16float'), volume('rgba16float')];
-  const flows: [GPUTexture, GPUTexture][] = [0, 1].map(() => [volume('rgba16float'), volume('rgba16float')]);
+  // The displacement fields are smooth, so half the grid carries them at an eighth of the fetch footprint.
+  const flows: [GPUTexture, GPUTexture][] = [0, 1].map(() => [volume('rgba16float', FLOW_GRID), volume('rgba16float', FLOW_GRID)]);
   const curl = volume('rgba16float');
   const divergence = volume('r32float', GRID, GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC);
   const shadow = volume('rgba16float', SHADOW_GRID);
@@ -98,6 +100,7 @@ export function createSimulation(device: GPUDevice) {
   };
 
   const workgroups = GRID.map((n) => Math.ceil(n / 4)) as [number, number, number];
+  const flowWorkgroups = FLOW_GRID.map((n) => Math.ceil(n / 4)) as [number, number, number];
   const shadowWorkgroups = SHADOW_GRID.map((n) => Math.ceil(n / 4)) as [number, number, number];
   const lightWorkgroups = LIGHT_GRID.map((n) => Math.ceil(n / 4)) as [number, number, number];
   const run = (pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, group: GPUBindGroup, size = workgroups) => {
@@ -150,7 +153,7 @@ export function createSimulation(device: GPUDevice) {
     run(pass, pipelines.project, groups.project);
     run(pass, pipelines.predict, groups.predict[sc]);
     run(pass, pipelines.correct, groups.correct[sc]);
-    run(pass, pipelines.advectFlow, groups.advectFlow[sc]);
+    run(pass, pipelines.advectFlow, groups.advectFlow[sc], flowWorkgroups);
     sc = 1 - sc;
   }
 
