@@ -16,10 +16,10 @@ type Row = {
   hidden?: (settings: ExportSettings) => boolean;
 };
 
-const MODES: [Mode, string][] = [['sequence', 'Sequence']];
+const MODES: [Mode, string][] = [['sequence', 'Sequence'], ['flipbook', 'Flipbook']];
 const ALL: Mode[] = ['sequence', 'flipbook', 'video'];
 const ROWS: Row[] = [
-  { key: 'format', label: 'Format', options: [['png', 'PNG']], modes: ['sequence'] },
+  { key: 'format', label: 'Format', options: [['png', 'PNG'], ['exr', 'EXR']], modes: ['sequence'] },
   { key: 'alpha', label: 'Alpha', options: [['premultiplied', 'Premultiplied'], ['straight', 'Straight']], modes: ['sequence', 'flipbook'], hidden: (s) => s.format === 'exr' },
   { key: 'bits', label: 'Bits', options: [[8, '8-bit'], [16, '16-bit']], modes: ['sequence'], hidden: (s) => s.format === 'exr' },
   { key: 'size', label: 'Size', options: SIZES.map((size) => [size, size.replace('x', ' × ')]), modes: ['sequence', 'video'] },
@@ -72,7 +72,14 @@ export default function ExportPanel() {
       <legend className="mb-2 text-xs uppercase tracking-wider text-muted">Export</legend>
       <div className="flex flex-wrap gap-1 self-start rounded-full border border-line p-1">
         {MODES.map(([mode, label]) => (
-          <button key={mode} type="button" disabled={exporting} onClick={() => set({ mode })} aria-pressed={mode === settings.mode} className={chip(mode === settings.mode)}>
+          <button
+            key={mode}
+            type="button"
+            disabled={exporting}
+            onClick={() => set(mode === 'flipbook' ? { mode, loop: true } : { mode })}
+            aria-pressed={mode === settings.mode}
+            className={chip(mode === settings.mode)}
+          >
             {label}
           </button>
         ))}

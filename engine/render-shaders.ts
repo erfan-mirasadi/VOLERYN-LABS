@@ -74,8 +74,17 @@ fn jitter(p: vec2<f32>, frame: f32) -> f32 {
 fn hg(mu: f32, g: f32) -> f32 { return (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * mu, 1.5); }
 fn dualLobe(mu: f32, k: f32) -> f32 { return 0.8 * hg(mu, 0.45 * k) + 0.2 * hg(mu, -0.25 * k); }
 
+// The solver keeps velocity on the lower cell faces in cells per second; one cell is 1 / P.size.x world units.
+fn velocityAt(q: vec3<f32>) -> vec3<f32> {
+  let h = 0.5 / P.size;
+  return vec3<f32>(
+    textureSampleLevel(vel, lin, q + vec3<f32>(h.x, 0.0, 0.0), 0.0).x,
+    textureSampleLevel(vel, lin, q + vec3<f32>(0.0, h.y, 0.0), 0.0).y,
+    textureSampleLevel(vel, lin, q + vec3<f32>(0.0, 0.0, h.z), 0.0).z) / P.size.x;
+}
+
 // The light groups add up to the beauty: fire is everything that glows, firelight the flame's light on smoke and
-// solids, smoke the key light and sky on them. depth is the visibility-weighted distance along the ray.
+// solids, smoke the key light and sky on them. depth and velocity are visibility-weighted means along the ray.
 struct March {
   fire: vec3<f32>,
   firelight: vec3<f32>,
@@ -85,6 +94,7 @@ struct March {
   seen: f32,
   heat: f32,
   dir: vec3<f32>,
+  velocity: vec3<f32>,
 }
 
 fn march(frag: vec2<f32>) -> March {
@@ -105,6 +115,7 @@ fn march(frag: vec2<f32>) -> March {
   var depthSum = 0.0;
   var weightSum = 0.0;
   var hottest = 0.0;
+  var velocitySum = vec3<f32>(0.0);
   // lightDir points at the light, so mu = 1 looks straight into it: backlit smoke gets the bright forward lobe.
   let mu = dot(dir, P.lightDir);
   let phase = vec3<f32>(dualLobe(mu, 1.0), dualLobe(mu, 0.5), dualLobe(mu, 0.25));
@@ -183,6 +194,8 @@ fn march(frag: vec2<f32>) -> March {
     m.firelight += scattered * flameLight;
     depthSum += transmittance * opacity * t;
     weightSum += transmittance * opacity;
+    // Only the export asks for motion; the live view skips the velocity taps.
+    if (V.frameTime > 0.0) { velocitySum += transmittance * opacity * velocityAt(q); }
     hottest = max(hottest, s.y);
     transmittance *= 1.0 - opacity;
     t += V.stepSize;
@@ -192,6 +205,7 @@ fn march(frag: vec2<f32>) -> March {
   m.smoke *= V.exposure;
   m.alpha = 1.0 - transmittance;
   m.depth = depthSum / max(weightSum, 1e-6);
+  m.velocity = velocitySum / max(weightSum, 1e-6);
   m.seen = weightSum;
   m.heat = hottest;
   return m;
@@ -226,14 +240,7 @@ fn fsExport(@builtin(position) frag: vec4<f32>) -> ExportOut {
   var data = vec4<f32>(0.0);
   if (m.seen > 0.02) {
     let p = V.camPos + m.dir * m.depth;
-    let q = (p - V.boxMin) / (V.boxMax - V.boxMin);
-    // The solver keeps velocity on the lower faces in cells per second; one cell is 1 / P.size.x world units.
-    let h = 0.5 / P.size;
-    let v = vec3<f32>(
-      textureSampleLevel(vel, lin, q + vec3<f32>(h.x, 0.0, 0.0), 0.0).x,
-      textureSampleLevel(vel, lin, q + vec3<f32>(0.0, h.y, 0.0), 0.0).y,
-      textureSampleLevel(vel, lin, q + vec3<f32>(0.0, 0.0, h.z), 0.0).z) / P.size.x;
-    data = vec4<f32>(toPixel(p + v * V.frameTime) - toPixel(p), m.depth * dot(m.dir, V.forward), 1.0);
+    data = vec4<f32>(toPixel(p + m.velocity * V.frameTime) - toPixel(p), m.depth * dot(m.dir, V.forward), 1.0);
   }
   let w = V.sampleWeight;
   return ExportOut(vec4<f32>(m.fire, m.alpha) * w, vec4<f32>(m.firelight, m.heat) * w, vec4<f32>(m.smoke, 0.0) * w, data * w);

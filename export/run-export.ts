@@ -1,11 +1,15 @@
 import type { Engine } from '@/engine/engine';
-import { type Fps, loopOverlap, type OfflineJob, type RenderedFrame, substepsFor } from '@/engine/offline-render';
+import { fitCamera, type Fps, loopOverlap, type OfflineJob, type RenderedFrame, substepsFor } from '@/engine/offline-render';
 import { EXPORT_STEP_CELLS } from '@/engine/render';
+import { encodeExr } from './exr';
 import type { Destination } from './files';
-import { type Bytes, encodeJson, encodePng } from './png';
+import { createSheet, MOTION_RANGE } from './flipbook';
+import { cameraMatrices, toExrChannels, toRgba } from './planes';
+import { encodeJson, encodePng } from './png';
 
 // Seconds simulated before the first frame, so a fire has risen and settled; an explosion starts at its charge.
 const WARMUP = 3;
+const FLIPBOOK_FOV = 20;
 
 export const SIZES = ['1280x720', '1920x1080', '2560x1440', '3840x2160', '1080x1080', '1080x1920'] as const;
 
@@ -48,34 +52,33 @@ export function folderName(presetId: string, seed: number) {
   return `voleryn-${presetId}-seed${seed}-${stamp}`;
 }
 
-// Every half-float bit pattern as a float, so a frame's texels are read by lookup.
-let halfTable: Float32Array | undefined;
-export const halves = () => (halfTable ??= new Float32Array(new Float16Array(Uint16Array.from({ length: 65536 }, (_, i) => i).buffer)));
-
 export async function runExport(engine: Engine, settings: ExportSettings, destination: Destination, onProgress: (progress: Progress) => void, signal: AbortSignal) {
   const snapshot = engine.snapshot();
   const { preset } = snapshot;
   const explosion = preset.mode === 'explosion';
-  const [width, height] = settings.size.split('x').map(Number);
+  const flipbook = settings.mode === 'flipbook';
+  const exr = settings.mode === 'sequence' && settings.format === 'exr';
+  const [cols, rows] = settings.grid.split('x').map(Number);
+  const [width, height] = flipbook ? [settings.cell, settings.cell] : settings.size.split('x').map(Number);
   const job: OfflineJob = {
     width,
     height,
     fps: settings.fps,
-    frames: settings.seconds * settings.fps,
+    frames: flipbook ? cols * rows : settings.seconds * settings.fps,
     warmup: explosion ? 0 : WARMUP,
     samples: settings.samples,
-    camera: snapshot.camera,
+    camera: flipbook ? fitCamera(snapshot.camera.eye, FLIPBOOK_FOV) : snapshot.camera,
     loop: settings.loop && !explosion,
-    read: ['display'],
+    read: exr ? ['fire', 'firelight', 'smoke', 'data'] : flipbook && settings.motion !== 'off' ? ['display', 'data'] : ['display'],
   };
-  const sink = pngSink(destination, preset.id, settings);
+  const overlap = job.loop ? loopOverlap(job.frames) : 0;
   const sidecar = {
     app: 'Voleryn Labs',
     version: 1,
     preset,
     tweaks: snapshot.tweaks,
     boxes: snapshot.boxes,
-    camera: { ...snapshot.camera, orbit: snapshot.orbit },
+    camera: { ...job.camera, orbit: snapshot.orbit },
     render: {
       width: job.width,
       height: job.height,
@@ -87,17 +90,37 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
       dt: 1 / (job.fps * substepsFor(job.fps)),
       samples: job.samples,
       stepCells: EXPORT_STEP_CELLS,
-      loop: { overlap: job.loop ? loopOverlap(job.frames) : 0 },
+      loop: { overlap, method: 'field-space crossfade' },
     },
-    output: {
-      mode: settings.mode,
-      format: settings.format,
-      alpha: settings.alpha,
-      bits: settings.bits,
-      colour: `sRGB-encoded display image (ACES fit), alpha ${settings.alpha}`,
-      ...(settings.alpha === 'straight' && { note: 'alpha raised to max(rgb) so emissive flame survives' }),
-    },
+    output: outputNotes(settings, exr),
+    ...(flipbook && {
+      flipbook: {
+        cols,
+        rows,
+        frames: job.frames,
+        fps: job.fps,
+        cell: settings.cell,
+        order: 'row-major from top-left',
+        alpha: settings.alpha,
+        lens: FLIPBOOK_FOV,
+        ...(settings.motion !== 'off' && {
+          motion: {
+            file: `${preset.id}-motion.png`,
+            engine: settings.motion,
+            range: MOTION_RANGE,
+            decode: `uv = (rg - 0.5) * 2 * ${MOTION_RANGE} per frame`,
+            vAxis: settings.motion === 'unity' ? 'up' : 'down',
+            neutral: 128,
+          },
+        }),
+      },
+    }),
   };
+  const sink = flipbook
+    ? flipbookSink(destination, preset.id, settings, cols, rows)
+    : exr
+      ? exrSink(destination, preset.id, job, JSON.stringify(sidecar))
+      : pngSink(destination, preset.id, settings);
   const started = performance.now();
   try {
     await engine.render(
@@ -118,46 +141,48 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
   }
 }
 
+function outputNotes(settings: ExportSettings, exr: boolean) {
+  if (exr) {
+    return {
+      mode: settings.mode,
+      format: 'exr',
+      colour: 'scene-linear Rec.709/D65, premultiplied; RGB = fire + firelight + smoke; Z planar camera depth, far 1e10; forward.u/v pixels per frame, +v up; temperature in simulation units',
+    };
+  }
+  return {
+    mode: settings.mode,
+    format: 'png',
+    alpha: settings.alpha,
+    bits: settings.mode === 'sequence' ? settings.bits : 8,
+    colour: `sRGB-encoded display image (ACES fit), alpha ${settings.alpha}`,
+    ...(settings.alpha === 'straight' && { note: 'alpha raised to max(rgb) so emissive flame survives' }),
+  };
+}
+
+const frameName = (id: string, index: number, extension: string) => `${id}.${String(index + 1).padStart(4, '0')}.${extension}`;
+
 function pngSink(destination: Destination, id: string, settings: ExportSettings): Sink {
   return {
-    frame: async (frame) => destination.write(`${id}.${String(frame.index + 1).padStart(4, '0')}.png`, await encodePng(frame.width, frame.height, settings.bits, toRgba(frame, settings.bits, settings.alpha === 'straight'))),
+    frame: async (frame) => destination.write(frameName(id, frame.index, 'png'), await encodePng(frame.width, frame.height, settings.bits, toRgba(frame, settings.bits, settings.alpha === 'straight'))),
     finish: async () => {},
   };
 }
 
-// The display plane as packed 8- or 16-bit RGBA. Straight alpha is raised to the brightest channel, so a bare flame,
-// which covers nothing, still survives the division.
-export function toRgba({ width, height, stride, planes }: RenderedFrame, bits: 8 | 16, straight: boolean): Bytes {
-  const display = planes.display!;
-  const half = halves();
-  const peak = bits === 8 ? 255 : 65535;
-  const out = new Uint8Array(width * height * (bits / 2));
-  let o = 0;
-  const put = (value: number) => {
-    const q = Math.round(Math.min(Math.max(value, 0), 1) * peak);
-    if (bits === 16) out[o++] = q >> 8;
-    out[o++] = q & 255;
+function exrSink(destination: Destination, id: string, job: OfflineJob, comments: string): Sink {
+  const meta = { fps: job.fps, ...cameraMatrices(job.camera, job.width / job.height), comments };
+  return {
+    frame: async (frame) => destination.write(frameName(id, frame.index, 'exr'), await encodeExr(frame.width, frame.height, toExrChannels(frame), meta)),
+    finish: async () => {},
   };
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const i = y * stride + 4 * x;
-      let r = half[display[i]];
-      let g = half[display[i + 1]];
-      let b = half[display[i + 2]];
-      let a = half[display[i + 3]];
-      if (straight) {
-        a = Math.max(a, r, g, b);
-        if (a > 0) {
-          r /= a;
-          g /= a;
-          b /= a;
-        }
-      }
-      put(r);
-      put(g);
-      put(b);
-      put(a);
-    }
-  }
-  return out;
+}
+
+function flipbookSink(destination: Destination, id: string, settings: ExportSettings, cols: number, rows: number): Sink {
+  const sheet = createSheet(cols, rows, settings.cell, settings.alpha === 'straight', settings.motion);
+  return {
+    frame: async (frame) => sheet.place(frame),
+    async finish() {
+      await destination.write(`${id}-sheet.png`, await encodePng(sheet.width, sheet.height, 8, sheet.colour));
+      if (sheet.vectors) await destination.write(`${id}-motion.png`, await encodePng(sheet.width, sheet.height, 8, sheet.vectors));
+    },
+  };
 }

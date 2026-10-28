@@ -91,6 +91,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     { binding: 7, resource: volumes.noise.repeat },
     { binding: 8, resource: volumes.flows[j][0].createView() },
     { binding: 9, resource: volumes.flows[j][1].createView() },
+    { binding: 10, resource: volumes.velocity.createView() },
   ];
   const raymarchGroups = volumes.scalars.map((_, j) => device.createBindGroup({ layout: raymarch.getBindGroupLayout(0), entries: volumeEntries(j) }));
 
@@ -99,9 +100,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   function exportResources() {
     if (exportPipelines) return exportPipelines;
     const march = pipeline(renderModule, 'fsExport', Array.from({ length: 4 }, () => ({ format: TARGET_FORMAT, blend: { color: ADD, alpha: ADD } })));
-    const groups = volumes.scalars.map((_, j) =>
-      device.createBindGroup({ layout: march.getBindGroupLayout(0), entries: [...volumeEntries(j), { binding: 10, resource: volumes.velocity.createView() }] }),
-    );
+    const groups = volumes.scalars.map((_, j) => device.createBindGroup({ layout: march.getBindGroupLayout(0), entries: volumeEntries(j) }));
     exportPipelines = { march, display: fullscreen(DISPLAY, TARGET_FORMAT), groups };
     return exportPipelines;
   }
