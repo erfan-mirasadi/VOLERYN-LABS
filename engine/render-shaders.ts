@@ -71,7 +71,7 @@ fn jitter(p: vec2<f32>, frame: f32) -> f32 {
 
 // Henyey-Greenstein with the 4 pi folded in, so g = 0 gives 1; smoke scatters mostly forward with a little back.
 fn hg(mu: f32, g: f32) -> f32 { return (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * mu, 1.5); }
-fn dualLobe(mu: f32, k: f32) -> f32 { return 0.8 * hg(mu, 0.55 * k) + 0.2 * hg(mu, -0.25 * k); }
+fn dualLobe(mu: f32, k: f32) -> f32 { return 0.8 * hg(mu, 0.45 * k) + 0.2 * hg(mu, -0.25 * k); }
 
 @fragment
 fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
