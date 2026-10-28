@@ -54,7 +54,6 @@ export default function ExportPanel() {
     const controller = new AbortController();
     abort.current = controller;
     setMessage(null);
-    setProgress({ done: 0, total: 1, msPerFrame: 0 });
     setExporting(true);
     try {
       await runExport(engine, settings, destination, setProgress, controller.signal);
@@ -122,7 +121,8 @@ export default function ExportPanel() {
             className="h-1.5 w-full appearance-none overflow-hidden rounded-full [&::-webkit-progress-bar]:bg-line [&::-webkit-progress-value]:bg-ember"
           />
           <p className="font-mono text-xs tabular-nums text-muted">
-            Frame {progress.done} / {progress.total} · {(progress.msPerFrame / 1000).toFixed(2)} s per frame · about {clock((progress.total - progress.done) * progress.msPerFrame)} left
+            {progress.done === 0 ? 'Warming up' : `Frame ${progress.done} / ${progress.total}`}
+            {progress.msPerFrame > 0 && ` · ${(progress.msPerFrame / 1000).toFixed(2)} s per frame · about ${clock((progress.total - progress.done) * progress.msPerFrame)} left`}
           </p>
         </div>
       )}

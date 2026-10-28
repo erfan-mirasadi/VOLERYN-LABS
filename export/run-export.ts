@@ -133,13 +133,16 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
       : exr
         ? exrSink(destination, preset.id, job, JSON.stringify(sidecar))
         : pngSink(destination, preset.id, settings);
-  const started = performance.now();
+  onProgress({ done: 0, total: job.frames, msPerFrame: 0 });
+  // The clock starts at the first delivered frame, so the warm-up does not inflate the estimate.
+  let started = 0;
   try {
     await engine.render(
       job,
       async (frame) => {
         await sink.frame(frame);
-        onProgress({ done: frame.index + 1, total: job.frames, msPerFrame: (performance.now() - started) / (frame.index + 1) });
+        if (frame.index === 0) started = performance.now();
+        onProgress({ done: frame.index + 1, total: job.frames, msPerFrame: frame.index ? (performance.now() - started) / frame.index : 0 });
       },
       signal,
     );
