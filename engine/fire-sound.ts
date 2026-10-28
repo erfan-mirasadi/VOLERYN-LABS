@@ -6,6 +6,7 @@ const NOISE_SECONDS = 2;
 const BED_RATE = 0.31;
 const AIR_RATE = 0.73;
 const FLUTTER_RATE = 0.017;
+const LOOKAHEAD = 0.1;
 const MASTER = 0.8;
 
 export type FireSound = ReturnType<typeof createFireSound>;
@@ -15,6 +16,9 @@ export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
   const noise = ctx.createBuffer(1, NOISE_SECONDS * rate, rate);
   const noiseData = noise.getChannelData(0);
   for (let i = 0; i < noiseData.length; i++) noiseData[i] = Math.random() * 2 - 1;
+  const click = ctx.createBuffer(1, Math.round(0.06 * rate), rate);
+  const clickData = click.getChannelData(0);
+  for (let i = 0; i < clickData.length; i++) clickData[i] = (Math.random() * 2 - 1) * Math.exp(-i / (0.0025 * rate));
 
   const glide = (param: AudioParam, value: number, tau = 0.1) => {
     param.cancelScheduledValues(ctx.currentTime);
@@ -70,6 +74,10 @@ export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
     glide(node.positionZ, world(cell[2], 2));
   };
 
+  let crackleRate = 0;
+  let crackleGain = 0;
+  let nextCrackle = 0;
+
   function scene(preset: Preset, tweaks: Tweaks, boxes: Box[]) {
     const h = tweaks.heat;
     const w = Math.abs(tweaks.wind) / 60;
@@ -95,9 +103,34 @@ export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
     const windLevel = 0.8 * w ** 1.5;
     glide(wind.gain, windLevel);
     glide(gust.gain, (0.6 * windLevel) / flutterRms(0.4));
+
+    crackleRate = power * (objects ? 35 : 4);
+    crackleGain = objects ? 0.9 : 0.5;
   }
 
-  function update() {}
+  // A wood crackle: a few milliseconds of noise ringing through a random band; one in eight is a deeper pop.
+  function crackle(time: number) {
+    const pop = Math.random() < 1 / 8;
+    const u = Math.random();
+    const source = new AudioBufferSourceNode(ctx, { buffer: click, playbackRate: pop ? 0.25 + 0.15 * u : 0.6 + 1.2 * u });
+    const ring = pop ? filter('bandpass', 300 * 3 ** Math.random(), 3) : filter('bandpass', 1500 * (10 / 3) ** Math.random(), 2 + 6 * Math.random());
+    source.connect(ring).connect(gain(crackleGain * (pop ? 2 : 1) * (0.3 + 0.7 * Math.random() ** 2))).connect(base);
+    source.start(time);
+  }
+
+  // Crackles are a Poisson process scheduled a little ahead of the clock, once per frame and with no timers.
+  function update() {
+    const now = ctx.currentTime;
+    nextCrackle = Math.max(nextCrackle, now);
+    while (nextCrackle < now + LOOKAHEAD) {
+      if (crackleRate < 0.1) {
+        nextCrackle = now + LOOKAHEAD;
+        break;
+      }
+      crackle(nextCrackle);
+      nextCrackle -= Math.log(1 - Math.random()) / crackleRate;
+    }
+  }
 
   function burst() {}
 
