@@ -89,12 +89,18 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
     }
   }
   const overlap = job.loop ? loopOverlap(job.frames) : 0;
-  const targets = renderer.createExportTargets(job.width, job.height);
   const bytesPerRow = Math.ceil((8 * job.width) / 256) * 256;
   const planeBytes = bytesPerRow * job.height;
   const slotBytes = job.read.length * planeBytes;
   const slots = slotBytes > SINGLE_SLOT_BYTES ? 1 : 2;
+  device.pushErrorScope('out-of-memory');
+  const targets = renderer.createExportTargets(job.width, job.height);
   const staging = Array.from({ length: slots }, () => device.createBuffer({ size: slotBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
+  if (await device.popErrorScope()) {
+    targets.destroy();
+    for (const buffer of staging) buffer.destroy();
+    throw new Error('Not enough GPU memory for this size; try 1920 × 1080.');
+  }
   const busy = staging.map(() => Promise.resolve());
   let previous = Promise.resolve();
   try {

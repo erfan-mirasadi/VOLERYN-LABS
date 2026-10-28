@@ -152,7 +152,7 @@ function outputNotes(settings: ExportSettings, exr: boolean) {
       colour: 'scene-linear Rec.709/D65, premultiplied; RGB = fire + firelight + smoke; Z planar camera depth, far 1e10; forward.u/v pixels per frame, +v up; temperature in simulation units',
     };
   }
-  if (settings.mode === 'video') return { mode: 'video', format: 'mp4', colour: 'H.264 4:2:0 of the sRGB display image over black' };
+  if (settings.mode === 'video') return { mode: 'video', format: 'mp4', colour: 'H.264 4:2:0 BT.709 limited range of the sRGB display image over black' };
   return {
     mode: settings.mode,
     format: 'png',

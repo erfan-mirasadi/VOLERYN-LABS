@@ -116,7 +116,11 @@ export default function ExportPanel() {
       </button>
       {progress && (
         <div className="flex flex-col gap-1">
-          <progress value={progress.done} max={progress.total} className="h-1.5 w-full accent-ember" />
+          <progress
+            value={progress.done}
+            max={progress.total}
+            className="h-1.5 w-full appearance-none overflow-hidden rounded-full [&::-webkit-progress-bar]:bg-line [&::-webkit-progress-value]:bg-ember"
+          />
           <p className="font-mono text-xs tabular-nums text-muted">
             Frame {progress.done} / {progress.total} · {(progress.msPerFrame / 1000).toFixed(2)} s per frame · about {clock((progress.total - progress.done) * progress.msPerFrame)} left
           </p>
