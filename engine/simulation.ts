@@ -15,6 +15,7 @@ import {
   type Tweaks,
 } from './scene';
 import { CLEAR, EMISSION, HEADER, LIGHT_BLUR, MIX, SHADERS } from './simulation-shaders';
+import { createSparkSimulation } from './sparks';
 
 const PARAM_FLOATS = 64;
 const FLOW_GRID = GRID.map((n) => n / 2) as [number, number, number];
@@ -35,6 +36,8 @@ export type Volumes = {
   params: GPUBuffer;
   sampler: GPUSampler;
   noise: NoiseTextures;
+  // The spark particles the render draws over the raymarch.
+  sparks: GPUBuffer;
 };
 
 export type StepParams = { preset: Preset; tweaks: Tweaks; boxes: Box[]; time: number; dt: number; emitting: boolean; blast: number };
@@ -74,6 +77,7 @@ export function createSimulation(device: GPUDevice) {
   const staging = device.createBuffer({ size: ROW_BYTES * GRID[1] * GRID[2], usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   const pressure = createPressureSolver(device, paramSlots[0], divergence);
   const noise = createNoiseTextures(device);
+  const sparks = createSparkSimulation(device, { paramSlots, velocity, scalars, sampler });
 
   const compute = (code: string, constants?: Record<string, number>) =>
     device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code }), entryPoint: 'main', constants } });
@@ -143,6 +147,7 @@ export function createSimulation(device: GPUDevice) {
       ...boxData,
     ]);
     device.queue.writeBuffer(paramSlots[slot], 0, paramData);
+    sparks.writeParams(slot, tweaks.sparks);
   }
 
   // Velocity first: advect, add forces, project; then the scalars ride the divergence-free field.
@@ -161,6 +166,7 @@ export function createSimulation(device: GPUDevice) {
     run(pass, pipelines.correct, g.correct[sc]);
     run(pass, pipelines.advectFlow, g.advectFlow[sc], flowWorkgroups);
     sc = 1 - sc;
+    sparks.step(pass, slot, sc);
   }
 
   // The shadow volume and the flame's light volume, both read by the render; the blur ping-pongs and ends in light[0].
@@ -237,6 +243,7 @@ export function createSimulation(device: GPUDevice) {
     for (const [pipeline, group] of clearGroups) run(pass, pipeline, group);
     pass.end();
     device.queue.submit([encoder.finish()]);
+    sparks.clear();
   }
 
   function dispose() {
@@ -245,9 +252,10 @@ export function createSimulation(device: GPUDevice) {
     noise.values.destroy();
     noise.curl.destroy();
     pressure.dispose();
+    sparks.dispose();
     for (const buffer of [...paramSlots, blend, staging]) buffer.destroy();
   }
 
-  const volumes: Volumes = { scalars, flows, velocity, shadow, light: light[0], params: paramSlots[0], sampler, noise };
+  const volumes: Volumes = { scalars, flows, velocity, shadow, light: light[0], params: paramSlots[0], sampler, noise, sparks: sparks.buffer };
   return { volumes, writeParams, step, updateLighting, keepFrame, blendLoop, releaseKept, readResidual, clear, dispose, get scalarIndex() { return sc; } };
 }

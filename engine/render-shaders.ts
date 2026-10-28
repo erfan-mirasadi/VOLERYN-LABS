@@ -11,7 +11,7 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 }`;
 
 // The ACES fit, then the sRGB transfer curve, so a frame saved as sRGB decodes to what the viewport shows.
-const TONEMAP = /* wgsl */ `
+export const TONEMAP = /* wgsl */ `
 fn tonemap(c: vec3<f32>) -> vec3<f32> {
   let m = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0));
   return select(1.055 * pow(m, vec3<f32>(1.0 / 2.4)) - 0.055, 12.92 * m, m <= vec3<f32>(0.0031308));

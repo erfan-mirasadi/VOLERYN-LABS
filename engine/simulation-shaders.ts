@@ -86,7 +86,7 @@ fn blocked(c: vec3<i32>) -> vec3<bool> {
 `;
 
 // Reads the face-stored velocity at any point and traces where the gas there came from; needs vel and lin bound.
-const TRACE = /* wgsl */ `
+export const TRACE = /* wgsl */ `
 fn faceOffset(axis: i32) -> vec3<f32> { return 0.5 * vec3<f32>(f32(axis == 0), f32(axis == 1), f32(axis == 2)); }
 fn velocityAt(p: vec3<f32>) -> vec3<f32> {
   return vec3<f32>(

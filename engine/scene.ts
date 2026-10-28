@@ -55,6 +55,8 @@ export type Preset = {
   fireDensity: number;
   // How far, in cells, the flame's sub-cell noise displaces the lookup; 0 turns it off.
   detail: number;
+  // How many sparks the fire throws off, 0 to 1; the studio's default for its Sparks tweak.
+  sparks: number;
   // Explosions only: how long the charge feeds, in seconds, and the peak divergence per cell at its centre, in cells/s.
   burst?: number;
   blast?: number;
@@ -62,7 +64,7 @@ export type Preset = {
 };
 
 // Live tweaks the studio layers over a preset without changing the preset itself.
-export type Tweaks = { heat: number; vorticity: number; wind: number; seed: number };
+export type Tweaks = { heat: number; vorticity: number; wind: number; seed: number; sparks: number };
 
 export const MODE_INDEX: Record<EmitterMode, number> = { fire: 0, smoke: 1, explosion: 2, objects: 3 };
 
