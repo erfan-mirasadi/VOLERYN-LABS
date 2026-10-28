@@ -20,7 +20,7 @@ struct View {
   layer: f32,
   fireLight: f32,
   frame: f32,
-  pad2: f32,
+  fireDensity: f32,
 }
 @group(0) @binding(0) var<uniform> V: View;
 @group(0) @binding(1) var sca: texture_3d<f32>;
@@ -92,26 +92,32 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
           solidDistance(gh + vec3<f32>(0.0, e, 0.0)) - solidDistance(gh - vec3<f32>(0.0, e, 0.0)),
           solidDistance(gh + vec3<f32>(0.0, 0.0, e)) - solidDistance(gh - vec3<f32>(0.0, 0.0, e))));
         let lit = max(dot(n, P.lightDir), 0.0) * textureSampleLevel(shade, lin, qh, 0.0).x + 0.18;
-        let heat = textureSampleLevel(sca, lin, qh + n * 3.0 / P.size, 0.0).y;
+        let surface = textureSampleLevel(sca, lin, qh + n * 2.0 / P.size, 0.0);
         let flameLight = textureSampleLevel(glow, lin, qh, 0.0).rgb * V.fireLight * V.fire;
-        solid += transmittance * (vec3<f32>(0.075, 0.06, 0.05) * (lit + flameLight) + blackbody(heat * 0.9) * V.fire * 0.3);
+        let ember = blackbody(surface.y) * smoothstep(1.0, 6.0, surface.w) * 0.25 * V.fire;
+        solid += transmittance * (vec3<f32>(0.03, 0.025, 0.02) * (lit + flameLight) + ember);
         depthSum += transmittance * hit;
         weightSum += transmittance;
-        hottest = max(hottest, heat);
+        hottest = max(hottest, surface.y);
         transmittance = 0.0;
         break;
       }
     }
+    let lightHere = textureSampleLevel(glow, lin, q, 0.0);
     let s = textureSampleLevel(sca, lin, q, 0.0);
-    let absorb = exp(-s.x * V.density * V.stepSize);
-    let light = textureSampleLevel(shade, lin, q, 0.0).x;
-    let flameLight = textureSampleLevel(glow, lin, q, 0.0).rgb * V.fireLight * V.fire;
-    fire += transmittance * emission(s.y) * V.fire * V.stepSize;
-    smoke += transmittance * (V.smokeTint * (0.85 * light + 0.12 + flameLight) + blackbody(s.y * 0.7) * 0.05 * V.fire) * (1.0 - absorb);
-    depthSum += transmittance * (1.0 - absorb) * t;
-    weightSum += transmittance * (1.0 - absorb);
+    let light = textureSampleLevel(shade, lin, q, 0.0);
+    let flameLight = lightHere.rgb * V.fireLight * V.fire;
+    let sigmaSmoke = s.x * V.density;
+    let sigmaFire = V.fireDensity * flame(s.y);
+    let sigma = sigmaSmoke + sigmaFire;
+    let opacity = 1.0 - exp(-sigma * V.stepSize);
+    let reach = transmittance * opacity / max(sigma, 1e-4);
+    fire += reach * sigmaFire * blackbody(s.y) * V.fire;
+    smoke += reach * sigmaSmoke * V.smokeTint * (0.85 * light.x + 0.12 + flameLight);
+    depthSum += transmittance * opacity * t;
+    weightSum += transmittance * opacity;
     hottest = max(hottest, s.y);
-    transmittance *= absorb;
+    transmittance *= 1.0 - opacity;
     t += V.stepSize;
   }
   let alpha = 1.0 - transmittance;

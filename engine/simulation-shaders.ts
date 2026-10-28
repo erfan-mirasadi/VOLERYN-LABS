@@ -354,15 +354,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }`,
 };
 
-// Flame colour from temperature: an approximate blackbody curve, brighter with the fourth power of temperature.
+// Flame colour from temperature: an approximate blackbody curve between dull red and yellow, brighter when hotter.
+// flame() is how much of the hot gas is glowing soot: it emits where it absorbs.
 export const BLACKBODY = /* wgsl */ `
 fn blackbody(t: f32) -> vec3<f32> {
-  let k = clamp(8.0 + 7.0 * t, 8.0, 40.0);
+  let k = clamp(10.0 + 9.0 * t, 10.0, 24.0);
   let g = clamp((99.4708 * log(k) - 161.1196) / 255.0, 0.0, 1.0);
   let b = select(clamp((138.5177 * log(max(k - 10.0, 1.0)) - 305.0448) / 255.0, 0.0, 1.0), 0.0, k <= 19.0);
-  return pow(vec3<f32>(1.0, g, b), vec3<f32>(2.2)) * pow(k / 15.0, 4.0);
+  return pow(vec3<f32>(1.0, g, b), vec3<f32>(2.2)) * pow(k / 15.0, 2.5);
 }
-fn emission(t: f32) -> vec3<f32> { return blackbody(t) * smoothstep(0.2, 1.0, t); }
+fn flame(t: f32) -> f32 { return smoothstep(0.15, 0.6, t); }
 `;
 
 // The flame's light, averaged over each block of fine cells into the coarse light volume.
@@ -377,7 +378,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   for (var z = 0; z < ${scale}; z++) {
     for (var y = 0; y < ${scale}; y++) {
       for (var x = 0; x < ${scale}; x++) {
-        sum += emission(textureLoad(sca, base + vec3<i32>(x, y, z), 0).y);
+        let heat = textureLoad(sca, base + vec3<i32>(x, y, z), 0).y;
+        sum += blackbody(heat) * flame(heat);
       }
     }
   }

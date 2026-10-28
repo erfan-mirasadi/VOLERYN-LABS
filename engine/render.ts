@@ -120,7 +120,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
       ...BOX_MAX, DENSITY,
       ...preset.tint, preset.glow,
       0, 0, width, height,
-      0, FIRE_LIGHT, index, 0,
+      0, FIRE_LIGHT, index, preset.fireDensity,
     ]);
     device.queue.writeBuffer(viewBuffer, 0, viewData);
   }

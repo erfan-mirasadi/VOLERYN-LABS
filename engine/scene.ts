@@ -4,10 +4,10 @@ export const SHADOW_GRID = [32, 48, 32] as const;
 export const LIGHT_SCALE = 4;
 export const LIGHT_GRID = GRID.map((n) => n / LIGHT_SCALE) as [number, number, number];
 export const LIGHT_BLUR_PASSES = 3;
-export const FIRE_LIGHT = 3;
+export const FIRE_LIGHT = 12;
 export const DT = 1 / 60;
 export const DENSITY = 14;
-export const EXPOSURE = 0.8;
+export const EXPOSURE = 1.0;
 export const LIGHT = normalize([-0.45, 0.8, 0.4]);
 export const MAX_BOXES = 4;
 
@@ -35,6 +35,8 @@ export type Preset = {
   expansion: number;
   tint: [number, number, number];
   glow: number;
+  // Extinction of the glowing soot per box width; with glow it gives the flame a body that hides what is behind it.
+  fireDensity: number;
   objects?: Box[];
 };
 

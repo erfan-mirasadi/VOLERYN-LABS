@@ -16,5 +16,6 @@
   "damping": 0.8,
   "expansion": 0.08,
   "tint": [0.3, 0.28, 0.27],
-  "glow": 0.45
+  "glow": 0.8,
+  "fireDensity": 30
 }
