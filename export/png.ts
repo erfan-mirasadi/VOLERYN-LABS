@@ -29,10 +29,6 @@ export function concat(parts: Uint8Array[]): Bytes {
   return out;
 }
 
-export function encodeJson(value: unknown): Bytes {
-  return new TextEncoder().encode(JSON.stringify(value, null, 2)) as Bytes;
-}
-
 // An sRGB-tagged RGBA PNG from packed rows (16-bit samples big-endian), every row Sub-filtered.
 export async function encodePng(width: number, height: number, depth: 8 | 16, rgba: Uint8Array): Promise<Bytes> {
   const bpp = depth / 2;

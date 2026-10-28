@@ -154,15 +154,13 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
         encoder.copyTextureToBuffer({ texture }, { buffer, offset: p * planeBytes, bytesPerRow, rowsPerImage: job.height }, [job.width, job.height]);
       });
       device.queue.submit([encoder.finish()]);
-      const mapped = buffer.mapAsync(GPUMapMode.READ);
-      previous = busy[slot] = previous
-        .then(() => mapped)
-        .then(async () => {
-          const planes: RenderedFrame['planes'] = {};
-          job.read.forEach((plane, p) => (planes[plane] = new Uint16Array(buffer.getMappedRange(p * planeBytes, planeBytes))));
-          await onFrame({ index: j, width: job.width, height: job.height, stride: bytesPerRow / 2, planes });
-          buffer.unmap();
-        });
+      // Promise.all keeps the map handled when an earlier frame's sink failed and the finally destroys the buffer.
+      previous = busy[slot] = Promise.all([previous, buffer.mapAsync(GPUMapMode.READ)]).then(async () => {
+        const planes: RenderedFrame['planes'] = {};
+        job.read.forEach((plane, p) => (planes[plane] = new Uint16Array(buffer.getMappedRange(p * planeBytes, planeBytes))));
+        await onFrame({ index: j, width: job.width, height: job.height, stride: bytesPerRow / 2, planes });
+        buffer.unmap();
+      });
     }
     await previous;
   } finally {

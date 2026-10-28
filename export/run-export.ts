@@ -6,7 +6,7 @@ import type { Destination } from './files';
 import { createSheet, MOTION_RANGE } from './flipbook';
 import { createMp4Sink } from './mp4';
 import { cameraMatrices, toExrChannels, toRgba } from './planes';
-import { encodeJson, encodePng } from './png';
+import { encodePng } from './png';
 
 // Seconds simulated before the first frame, so a fire has risen and settled; an explosion starts at its charge.
 const WARMUP = 3;
@@ -126,17 +126,19 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
       },
     }),
   };
-  const sink = flipbook
-    ? flipbookSink(destination, preset.id, settings, cols, rows)
-    : settings.mode === 'video'
-      ? await videoSink(destination, preset.id, job)
-      : exr
-        ? exrSink(destination, preset.id, job, JSON.stringify(sidecar))
-        : pngSink(destination, preset.id, settings);
   onProgress({ done: 0, total: job.frames, msPerFrame: 0 });
   // The clock starts at the first delivered frame, so the warm-up does not inflate the estimate.
   let started = 0;
+  let active: Sink | undefined;
   try {
+    const sink = flipbook
+      ? flipbookSink(destination, preset.id, settings, cols, rows)
+      : settings.mode === 'video'
+        ? await videoSink(destination, preset.id, job)
+        : exr
+          ? exrSink(destination, preset.id, job, JSON.stringify(sidecar))
+          : pngSink(destination, preset.id, settings);
+    active = sink;
     await engine.render(
       job,
       async (frame) => {
@@ -147,10 +149,10 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
       signal,
     );
     await sink.finish();
-    await destination.write(`${preset.id}.json`, encodeJson(sidecar));
+    await destination.write(`${preset.id}.json`, new TextEncoder().encode(JSON.stringify(sidecar, null, 2)));
     await destination.finish();
   } catch (error) {
-    await sink.abort?.();
+    await active?.abort?.();
     await destination.discard();
     throw error;
   }
