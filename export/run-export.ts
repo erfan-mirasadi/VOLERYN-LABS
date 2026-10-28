@@ -11,6 +11,8 @@ import { encodeJson, encodePng } from './png';
 // Seconds simulated before the first frame, so a fire has risen and settled; an explosion starts at its charge.
 const WARMUP = 3;
 const FLIPBOOK_FOV = 20;
+// A sheet simulates at 60 fps and keeps every stride-th frame, so its cells span the clip at whatever playback rate that gives.
+const FLIPBOOK_FPS = 60;
 
 export const SIZES = ['1280x720', '1920x1080', '2560x1440', '3840x2160', '1080x1080', '1080x1920'] as const;
 
@@ -61,11 +63,14 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
   const exr = settings.mode === 'sequence' && settings.format === 'exr';
   const [cols, rows] = settings.grid.split('x').map(Number);
   const [width, height] = flipbook ? [settings.cell, settings.cell] : settings.size.split('x').map(Number);
+  const cells = cols * rows;
+  const stride = flipbook ? Math.ceil((settings.seconds * FLIPBOOK_FPS) / cells) : 1;
   const job: OfflineJob = {
     width,
     height,
-    fps: settings.fps,
-    frames: flipbook ? cols * rows : settings.seconds * settings.fps,
+    fps: flipbook ? FLIPBOOK_FPS : settings.fps,
+    frames: flipbook ? cells : settings.seconds * settings.fps,
+    stride,
     warmup: explosion ? 0 : WARMUP,
     samples: settings.samples,
     camera: flipbook ? fitCamera(snapshot.camera.eye, FLIPBOOK_FOV) : snapshot.camera,
@@ -85,6 +90,7 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
       height: job.height,
       fps: job.fps,
       frames: job.frames,
+      stride,
       first: 1,
       warmup: job.warmup,
       substeps: substepsFor(job.fps),
@@ -99,11 +105,14 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
         cols,
         rows,
         frames: job.frames,
-        fps: job.fps,
+        fps: job.fps / stride,
+        seconds: (job.frames * stride) / job.fps,
+        stride,
         cell: settings.cell,
         order: 'row-major from top-left',
         alpha: settings.alpha,
         lens: FLIPBOOK_FOV,
+        framing: 'the domain\'s inscribed cylinder with an 8% margin, from the live orbit direction',
         ...(settings.motion !== 'off' && {
           motion: {
             file: `${preset.id}-motion.png`,

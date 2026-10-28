@@ -3,6 +3,7 @@ import { BOX_MAX, BOX_MIN, type Preset } from './scene';
 import { LOOP_SOURCE, type Simulation } from './simulation';
 
 const MAX_OVERLAP = 32;
+const RIM_SAMPLES = 64;
 // One staging slot above this size is enough: two would hold a quarter gigabyte for a 4K EXR.
 const SINGLE_SLOT_BYTES = 128 * 2 ** 20;
 
@@ -16,6 +17,8 @@ export type OfflineJob = {
   frames: number;
   // Seconds simulated before the first frame.
   warmup: number;
+  // Simulated frames per rendered one; a flipbook keeps every stride-th frame so its cells span the clip.
+  stride: number;
   samples: number;
   camera: Camera;
   loop: boolean;
@@ -58,16 +61,20 @@ export const substepsFor = (fps: Fps) => Math.ceil(60 / fps);
 // How many frames the loop's tail is crossfaded toward its head.
 export const loopOverlap = (frames: number) => Math.min(MAX_OVERLAP, Math.max(4, Math.round(frames / 4)));
 
-// A narrow lens on the user's orbit direction, pulled back until the whole domain fits a square frame with a margin.
+// A narrow lens on the user's orbit direction, pulled back until the domain's inscribed cylinder fits a square frame
+// with a margin: the box corners would hold an oblique view further out for nothing.
 export function fitCamera(eye: Vec3, fovDegrees = 20, margin = 0.92): Camera {
   const centre = BOX_MIN.map((lo, k) => (lo + BOX_MAX[k]) / 2) as Vec3;
   const { forward, right, up } = cameraBasis({ eye, target: centre, tanHalfFov: 0 });
   const t = Math.tan((fovDegrees * Math.PI) / 360);
+  const radius = (BOX_MAX[0] - BOX_MIN[0]) / 2;
   let distance = 0;
-  for (let k = 0; k < 8; k++) {
-    const corner = [k & 1 ? BOX_MAX[0] : BOX_MIN[0], k & 2 ? BOX_MAX[1] : BOX_MIN[1], k & 4 ? BOX_MAX[2] : BOX_MIN[2]];
-    const rel = corner.map((c, i) => c - centre[i]) as Vec3;
-    distance = Math.max(distance, Math.max(Math.abs(dot(rel, right)), Math.abs(dot(rel, up))) / (margin * t) - dot(rel, forward));
+  for (let k = 0; k < RIM_SAMPLES; k++) {
+    const angle = (2 * Math.PI * k) / RIM_SAMPLES;
+    for (const y of [BOX_MIN[1], BOX_MAX[1]]) {
+      const rel: Vec3 = [radius * Math.cos(angle), y - centre[1], radius * Math.sin(angle)];
+      distance = Math.max(distance, Math.max(Math.abs(dot(rel, right)), Math.abs(dot(rel, up))) / (margin * t) - dot(rel, forward));
+    }
   }
   return { eye: centre.map((c, i) => c - forward[i] * distance) as Vec3, target: centre, tanHalfFov: t };
 }
@@ -106,7 +113,7 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
   try {
     for (let i = 0; i < job.frames + overlap; i++) {
       signal.throwIfAborted();
-      for (let s = 0; s < substeps; s++) time = ctx.step(dt);
+      for (let s = 0; s < substeps * job.stride; s++) time = ctx.step(dt);
       if (i < overlap) {
         simulation.keepFrame(i);
         continue;
@@ -132,7 +139,7 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
           jitter: [halton(s + 1, 2) - 0.5, halton(s + 1, 3) - 0.5],
           frame: j * job.samples + s,
           weight: 1 / job.samples,
-          frameTime: 1 / job.fps,
+          frameTime: job.stride / job.fps,
           first: s === 0,
         });
       }
