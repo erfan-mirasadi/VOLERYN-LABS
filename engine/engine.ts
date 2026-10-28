@@ -47,7 +47,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   const timer = new GpuTimer(device, hasTimestamps);
 
   let preset = initialPreset;
-  let tweaks: Tweaks = { heat: 1, vorticity: initialPreset.vorticity, wind: 0, seed: 0, blue: initialPreset.blue };
+  let tweaks: Tweaks = { heat: 1, vorticity: initialPreset.vorticity, wind: 0, seed: 0, blue: initialPreset.blue, sparks: initialPreset.sparks  };
   let boxes: Box[] = initialPreset.objects?.map((box) => ({ ...box })) ?? [];
   let simTime = 0;
   let burstStart = 0;
@@ -259,7 +259,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     lost: onDeviceLost,
     setPreset(next: Preset) {
       preset = next;
-      tweaks = { heat: 1, vorticity: next.vorticity, wind: 0, seed: tweaks.seed, blue: next.blue };
+      tweaks = { heat: 1, vorticity: next.vorticity, wind: 0, seed: tweaks.seed, blue: next.blue, sparks: next.sparks  };
       boxes = next.objects?.map((box) => ({ ...box })) ?? [];
       simulation.clear();
       renderer.resetHistory();

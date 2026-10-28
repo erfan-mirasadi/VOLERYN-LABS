@@ -20,5 +20,6 @@
   "fireDensity": 0,
   "ignite": 0,
   "detail": 0,
-  "blue": 0
+  "blue": 0,
+  "sparks": 0
 }

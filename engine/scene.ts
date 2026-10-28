@@ -57,6 +57,8 @@ export type Preset = {
   detail: number;
   // How much the fresh fuel at the base burns blue before soot forms; the Blue flame slider starts here.
   blue: number;
+  // How many sparks the fire throws off, 0 to 1; the studio's default for its Sparks tweak.
+  sparks: number;
   // Explosions only: how long the charge feeds, in seconds, and the peak divergence per cell at its centre, in cells/s.
   burst?: number;
   blast?: number;
@@ -64,7 +66,7 @@ export type Preset = {
 };
 
 // Live tweaks the studio layers over a preset without changing the preset itself.
-export type Tweaks = { heat: number; vorticity: number; wind: number; seed: number; blue: number };
+export type Tweaks = { heat: number; vorticity: number; wind: number; seed: number; blue: number; sparks: number };
 
 export const MODE_INDEX: Record<EmitterMode, number> = { fire: 0, smoke: 1, explosion: 2, objects: 3 };
 

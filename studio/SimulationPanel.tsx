@@ -9,6 +9,7 @@ const SLIDERS = [
   { key: 'wind', label: 'Wind', min: -60, max: 60, step: 1 },
   { key: 'seed', label: 'Seed', min: 0, max: 99, step: 1 },
   { key: 'blue', label: 'Blue flame', min: 0, max: 1, step: 0.01 },
+  { key: 'sparks', label: 'Sparks', min: 0, max: 1, step: 0.01 },
 ] as const;
 
 const BACKDROPS: { id: Backdrop; label: string }[] = [

@@ -1,6 +1,7 @@
 import { COMPOSITE, DISPLAY, RENDER, RESOLVE } from './render-shaders';
 import { BOX_MAX, BOX_MIN, DENSITY, EXPOSURE, FIRE_LIGHT, FLOW_PERIOD, GRID, type Preset } from './scene';
 import type { Volumes } from './simulation';
+import { createSparkRenderer } from './sparks';
 
 const VIEW_FLOATS = 40;
 const TARGET_FORMAT: GPUTextureFormat = 'rgba16float';
@@ -60,6 +61,8 @@ export type ExportSample = {
   weight: number;
   frameTime: number;
   first: boolean;
+  // How much of the sparks to show, 0 to 1: a loop fades them across its seam.
+  sparks: number;
 };
 
 export type Renderer = ReturnType<typeof createRenderer>;
@@ -95,6 +98,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     { binding: 10, resource: volumes.velocity.createView() },
   ];
   const raymarchGroups = volumes.scalars.map((_, j) => device.createBindGroup({ layout: raymarch.getBindGroupLayout(0), entries: volumeEntries(j) }));
+  const sparks = createSparkRenderer(device, viewBuffer, volumes, TARGET_FORMAT);
 
   // Export pipelines and bind groups are made on the first export, so the landing page's hero pays nothing for them.
   let exportPipelines: { march: GPURenderPipeline; display: GPURenderPipeline; groups: GPUBindGroup[] } | null = null;
@@ -174,7 +178,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     device.queue.writeBuffer(viewBuffer, 0, viewData);
   }
 
-  const fullscreenPass = (encoder: GPUCommandEncoder, view: GPUTextureView, pipeline: GPURenderPipeline, group: GPUBindGroup, timestampWrites?: GPURenderPassTimestampWrites) => {
+  const fullscreenPass = (encoder: GPUCommandEncoder, view: GPUTextureView, pipeline: GPURenderPipeline, group: GPUBindGroup, timestampWrites?: GPURenderPassTimestampWrites, then?: (pass: GPURenderPassEncoder) => void) => {
     const pass = encoder.beginRenderPass({
       colorAttachments: [{ view, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
       timestampWrites,
@@ -182,6 +186,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, group);
     pass.draw(3);
+    then?.(pass);
     pass.end();
   };
 
@@ -191,7 +196,9 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     device.queue.writeBuffer(blendBuffer, 0, new Float32Array([historyValid ? frame.blend : 1]));
     const next = 1 - historyIndex;
     fullscreenPass(encoder, current.createView(), raymarch, raymarchGroups[frame.scalarIndex], frame.timestamps.render);
-    fullscreenPass(encoder, history[next].createView(), resolve, resolveGroups[historyIndex], frame.timestamps.taa);
+    // Sparks go on after the temporal blend: it would dim a streak that moves every frame, and the next resolve
+    // clamps them out of the history, so they never ghost.
+    fullscreenPass(encoder, history[next].createView(), resolve, resolveGroups[historyIndex], frame.timestamps.taa, (pass) => sparks.draw(pass, frame.scalarIndex));
     fullscreenPass(encoder, canvasView, composite, compositeGroups[next], frame.timestamps.composite);
     historyIndex = next;
     historyValid = true;
@@ -240,6 +247,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     pass.setPipeline(march);
     pass.setBindGroup(0, groups[sample.source]);
     pass.draw(3);
+    sparks.drawExport(pass, sample.source, sample.sparks);
     pass.end();
     device.queue.submit([encoder.finish()]);
   }
@@ -272,6 +280,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     },
     dispose() {
       disposeTargets();
+      sparks.dispose();
       viewBuffer.destroy();
       blendBuffer.destroy();
     },
