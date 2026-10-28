@@ -1,6 +1,7 @@
 import { type Bytes, crc32 } from './png';
 
-// A zip without zip64 stops at 4 GB and 65,535 entries; the parts also sit in memory until the download starts.
+// A zip without zip64 stops at 4 GB and 65,535 entries; the cap stays well under that, and the parts sit in memory
+// until the download starts.
 const ZIP_LIMIT = 2 ** 31;
 const ZIP_MAX_ENTRIES = 65535;
 
@@ -9,7 +10,8 @@ export type Destination = {
   write(file: string, bytes: Bytes): Promise<void>;
   openStream?(file: string): Promise<FileSystemWritableFileStream>;
   finish(): Promise<void>;
-  discard(): void;
+  // Drops what a cancelled or failed job wrote, so a half-written folder never passes for an export.
+  discard(): Promise<void>;
 };
 
 type DirectoryPicker = (options: { id: string; mode: 'readwrite' }) => Promise<FileSystemDirectoryHandle>;
@@ -20,14 +22,14 @@ export async function openDestination(folder: string): Promise<Destination | nul
   if (!picker.showDirectoryPicker) return zipDestination(folder);
   try {
     const root = await picker.showDirectoryPicker({ id: 'voleryn-export', mode: 'readwrite' });
-    return directoryDestination(await root.getDirectoryHandle(folder, { create: true }), folder);
+    return directoryDestination(root, await root.getDirectoryHandle(folder, { create: true }), folder);
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') return null;
     throw error;
   }
 }
 
-function directoryDestination(dir: FileSystemDirectoryHandle, name: string): Destination {
+function directoryDestination(root: FileSystemDirectoryHandle, dir: FileSystemDirectoryHandle, name: string): Destination {
   const openStream = async (file: string) => (await dir.getFileHandle(file, { create: true })).createWritable();
   return {
     name,
@@ -38,7 +40,7 @@ function directoryDestination(dir: FileSystemDirectoryHandle, name: string): Des
       await stream.close();
     },
     finish: async () => {},
-    discard: () => {},
+    discard: () => root.removeEntry(name, { recursive: true }).catch(() => {}),
   };
 }
 
@@ -54,7 +56,7 @@ function zipDestination(name: string): Destination {
     name,
     async write(file, bytes) {
       const fileName = new TextEncoder().encode(file);
-      if (offset + bytes.length + ZIP_MAX_ENTRIES * 96 > ZIP_LIMIT || entries.length === ZIP_MAX_ENTRIES) {
+      if (offset + bytes.length > ZIP_LIMIT || entries.length === ZIP_MAX_ENTRIES) {
         throw new Error('Too big for a zip download here: pick a folder in Chrome or Edge, or shorten the clip.');
       }
       const crc = crc32(bytes);
@@ -79,7 +81,7 @@ function zipDestination(name: string): Destination {
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
     },
-    discard() {
+    async discard() {
       parts.length = 0;
     },
   };

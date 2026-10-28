@@ -151,7 +151,7 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
     await destination.finish();
   } catch (error) {
     await sink.abort?.();
-    destination.discard();
+    await destination.discard();
     throw error;
   }
 }
