@@ -74,9 +74,11 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   for (var i = 0; i < 160; i++) {
     if (t > tFar || transmittance < 0.01) { break; }
     let q = (V.camPos + dir * t - V.boxMin) / size;
+    let g = q * P.size - vec3<f32>(0.5);
+    var sd = 1e5;
     if (P.mode == 3.0) {
-      let g = q * P.size - vec3<f32>(0.5);
-      if (solidDistance(g) < 0.0) {
+      sd = solidDistance(g);
+      if (sd < 0.0) {
         // Bisect back to the real surface; the coarse, jittered march would speckle it.
         var outside = t - V.stepSize;
         var hit = t;
@@ -104,6 +106,11 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
       }
     }
     let lightHere = textureSampleLevel(glow, lin, q, 0.0);
+    // Three steps are 4.5 cells, inside the occupancy's 8-cell margin and short of any solid the SDF reports.
+    if (lightHere.a < 0.004 && sd > 4.5) {
+      t += 3.0 * V.stepSize;
+      continue;
+    }
     let s = textureSampleLevel(sca, lin, q, 0.0);
     let light = textureSampleLevel(shade, lin, q, 0.0);
     let flameLight = lightHere.rgb * V.fireLight * V.fire;

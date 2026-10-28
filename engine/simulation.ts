@@ -56,8 +56,8 @@ export function createSimulation(device: GPUDevice) {
   const staging = device.createBuffer({ size: ROW_BYTES * GRID[1] * GRID[2], usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   const pressure = createPressureSolver(device, params, divergence);
 
-  const compute = (code: string) =>
-    device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code }), entryPoint: 'main' } });
+  const compute = (code: string, constants?: Record<string, number>) =>
+    device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code }), entryPoint: 'main', constants } });
   const pipelines = Object.fromEntries(Object.entries(SHADERS).map(([name, body]) => [name, compute(HEADER + body)])) as Record<
     keyof typeof SHADERS,
     GPUComputePipeline
@@ -65,7 +65,7 @@ export function createSimulation(device: GPUDevice) {
   const clearHalf = compute(CLEAR('rgba16float'));
   const clearFloat = compute(CLEAR('r32float'));
   const emission = compute(EMISSION(LIGHT_SCALE));
-  const lightBlur = compute(LIGHT_BLUR);
+  const lightBlur = [compute(LIGHT_BLUR, { dilate: 0 }), compute(LIGHT_BLUR, { dilate: 1 })];
 
   const bind = (pipeline: GPUComputePipeline, resources: (GPUBuffer | GPUTexture | GPUSampler)[]) => bindResources(device, pipeline, resources);
   const both = <T>(make: (i: number) => T) => [make(0), make(1)];
@@ -82,7 +82,7 @@ export function createSimulation(device: GPUDevice) {
     correct: both((j) => bind(pipelines.correct, [params, velocity, scalars[j], scratch, scalars[1 - j], sampler])),
     shadow: both((j) => bind(pipelines.shadow, [params, scalars[j], sampler, shadow])),
     emission: both((j) => bind(emission, [scalars[j], light[0]])),
-    lightBlur: both((k) => bind(lightBlur, [light[k], light[1 - k]])),
+    lightBlur: lightBlur.map((pipeline) => both((k) => bind(pipeline, [light[k], light[1 - k]]))),
     clear: [
       ...[velocity, ...scalars].map((t) => [clearHalf, bind(clearHalf, [t])] as const),
       [clearFloat, bind(clearFloat, [pressure.texture])] as const,
@@ -138,10 +138,14 @@ export function createSimulation(device: GPUDevice) {
   }
 
   // The shadow volume and the flame's light volume, both read by the render; the blur ping-pongs and ends in light[0].
+  // The first two blurs also dilate the occupancy by two coarse cells, the margin the raymarch's empty-space skip needs.
   function updateLighting(pass: GPUComputePassEncoder) {
     run(pass, pipelines.shadow, groups.shadow[sc], shadowWorkgroups);
     run(pass, emission, groups.emission[sc], lightWorkgroups);
-    for (let i = 0; i < LIGHT_BLUR_PASSES * 2; i++) run(pass, lightBlur, groups.lightBlur[i % 2], lightWorkgroups);
+    for (let i = 0; i < LIGHT_BLUR_PASSES * 2; i++) {
+      const dilate = i < 2 ? 1 : 0;
+      run(pass, lightBlur[dilate], groups.lightBlur[dilate][i % 2], lightWorkgroups);
+    }
   }
 
   let reading = false;

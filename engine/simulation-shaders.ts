@@ -372,7 +372,8 @@ fn blackbody(t: f32) -> vec3<f32> {
 fn flame(t: f32) -> f32 { return smoothstep(0.15, 0.6, t); }
 `;
 
-// The flame's light, averaged over each block of fine cells into the coarse light volume.
+// The flame's light, averaged over each block of fine cells into the coarse light volume; its alpha holds the block's
+// occupancy (the most smoke or heat in it) so the raymarch can skip empty space.
 export const EMISSION = (scale: number) => BLACKBODY + /* wgsl */ `
 @group(0) @binding(0) var sca: texture_3d<f32>;
 @group(0) @binding(1) var dst: texture_storage_3d<rgba16float, write>;
@@ -381,19 +382,23 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (any(id >= textureDimensions(dst))) { return; }
   let base = vec3<i32>(id) * ${scale};
   var sum = vec3<f32>(0.0);
+  var occupancy = 0.0;
   for (var z = 0; z < ${scale}; z++) {
     for (var y = 0; y < ${scale}; y++) {
       for (var x = 0; x < ${scale}; x++) {
-        let heat = textureLoad(sca, base + vec3<i32>(x, y, z), 0).y;
-        sum += blackbody(heat) * flame(heat);
+        let s = textureLoad(sca, base + vec3<i32>(x, y, z), 0);
+        sum += blackbody(s.y) * flame(s.y);
+        occupancy = max(occupancy, max(s.x, s.y));
       }
     }
   }
-  textureStore(dst, vec3<i32>(id), vec4<f32>(sum / ${(scale * scale * scale).toFixed(1)}, 1.0));
+  textureStore(dst, vec3<i32>(id), vec4<f32>(sum / ${(scale * scale * scale).toFixed(1)}, occupancy));
 }`;
 
 // Spreads the light volume one cell outwards; run a few times it stands in for light scattering through the smoke.
+// With dilate set the occupancy grows by a cell too, otherwise it carries.
 export const LIGHT_BLUR = /* wgsl */ `
+override dilate: u32;
 @group(0) @binding(0) var src: texture_3d<f32>;
 @group(0) @binding(1) var dst: texture_storage_3d<rgba16float, write>;
 @compute @workgroup_size(4, 4, 4)
@@ -403,17 +408,22 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (any(c >= n)) { return; }
   var sum = vec3<f32>(0.0);
   var weight = 0.0;
+  var occupancy = textureLoad(src, c, 0).a;
   for (var z = -1; z <= 1; z++) {
     for (var y = -1; y <= 1; y++) {
       for (var x = -1; x <= 1; x++) {
         let w = 1.0 / (1.0 + f32(x * x + y * y + z * z));
         let p = c + vec3<i32>(x, y, z);
-        if (all(p >= vec3<i32>(0)) && all(p < n)) { sum += textureLoad(src, p, 0).rgb * w; }
+        if (all(p >= vec3<i32>(0)) && all(p < n)) {
+          let tap = textureLoad(src, p, 0);
+          sum += tap.rgb * w;
+          if (dilate == 1u) { occupancy = max(occupancy, tap.a); }
+        }
         weight += w;
       }
     }
   }
-  textureStore(dst, c, vec4<f32>(sum / weight, 1.0));
+  textureStore(dst, c, vec4<f32>(sum / weight, occupancy));
 }`;
 
 export const CLEAR = (format: 'rgba16float' | 'r32float') => /* wgsl */ `
