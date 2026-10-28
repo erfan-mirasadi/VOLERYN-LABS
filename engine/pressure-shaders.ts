@@ -102,7 +102,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   textureStore(solid, c, vec4<f32>(f32(isSolid(vec3<f32>(c))), 0.0, 0.0, 0.0));
 }`;
 
-// A coarse cell is solid when any of its eight fine cells is, so obstacles survive on every level.
+// A coarse cell is solid only when all eight of its fine cells are. Closing a cell on any solid child would seal the
+// narrow gaps between boxes on the coarse levels, and a coarse correction that overshoots the fine problem grows
+// step over step through the warm-started pressure.
 export const COARSEN = /* wgsl */ `
 @group(0) @binding(0) var fine: texture_3d<f32>;
 @group(0) @binding(1) var solid: texture_storage_3d<r32float, write>;
@@ -110,9 +112,9 @@ export const COARSEN = /* wgsl */ `
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
   if (any(c >= vec3<i32>(textureDimensions(solid)))) { return; }
-  var any = 0.0;
+  var all = 1.0;
   for (var k = 0; k < 8; k++) {
-    any = max(any, textureLoad(fine, 2 * c + vec3<i32>(k & 1, (k >> 1u) & 1, (k >> 2u) & 1), 0).x);
+    all = min(all, textureLoad(fine, 2 * c + vec3<i32>(k & 1, (k >> 1u) & 1, (k >> 2u) & 1), 0).x);
   }
-  textureStore(solid, c, vec4<f32>(any, 0.0, 0.0, 0.0));
+  textureStore(solid, c, vec4<f32>(all, 0.0, 0.0, 0.0));
 }`;
