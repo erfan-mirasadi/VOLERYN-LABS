@@ -98,7 +98,7 @@ export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
     const flow = burning ? (preset.emit * cells) / 36600 : 0;
     const centre = objects ? ([0, 1, 2] as const).map((axis) => boxes.reduce((sum, b) => sum + [b.x, b.y, b.z][axis], 0) / boxes.length) : preset.emitter;
     place(base, centre, 0, 0);
-    place(plume, centre, (0.5 * tweaks.wind) / 60, 0.7);
+    place(plume, centre, (0.35 * tweaks.wind) / 60, 0.7);
 
     rest = { rumble: 0.35 * Math.sqrt(power), roar: 0.3 * Math.sqrt(power), cutoff: 250 + 350 * Math.min(1.5, (preset.buoyancy * h) / 40) };
     glide(rumble.gain, rest.rumble);
