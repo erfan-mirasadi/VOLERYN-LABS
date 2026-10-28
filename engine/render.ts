@@ -199,7 +199,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     const { display: displayPipeline } = exportResources();
     const make = () =>
       device.createTexture({ size: [width, height], format: TARGET_FORMAT, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
-    const layers = [make(), make(), make(), make()];
+    const layers = { fire: make(), firelight: make(), smoke: make(), data: make() };
     const display = make();
     return {
       width,
@@ -208,7 +208,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
       display,
       displayGroup: device.createBindGroup({
         layout: displayPipeline.getBindGroupLayout(0),
-        entries: layers.slice(0, 3).map((layer, binding) => ({ binding, resource: layer.createView() })),
+        entries: [layers.fire, layers.firelight, layers.smoke].map((layer, binding) => ({ binding, resource: layer.createView() })),
       }),
       previewGroup: device.createBindGroup({
         layout: composite.getBindGroupLayout(0),
@@ -218,7 +218,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
         ],
       }),
       destroy() {
-        for (const texture of [...layers, display]) texture.destroy();
+        for (const texture of [...Object.values(layers), display]) texture.destroy();
       },
     };
   }
@@ -232,7 +232,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     const loadOp: GPULoadOp = sample.first ? 'clear' : 'load';
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
-      colorAttachments: targets.layers.map((layer) => ({ view: layer.createView(), loadOp, storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } })),
+      colorAttachments: Object.values(targets.layers).map((layer) => ({ view: layer.createView(), loadOp, storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } })),
     });
     pass.setPipeline(march);
     pass.setBindGroup(0, groups[sample.source]);

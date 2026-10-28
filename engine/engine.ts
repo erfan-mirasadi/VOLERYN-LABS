@@ -36,7 +36,6 @@ export type EngineStats = {
 };
 
 export type Engine = Awaited<ReturnType<typeof createEngine>>;
-export type Snapshot = ReturnType<Engine['snapshot']>;
 
 export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Preset) {
   const { device, format, adapterName, hasTimestamps } = await requestGpu();
@@ -292,7 +291,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
         tweaks: { ...tweaks },
         boxes: boxes.map((box) => ({ ...box })),
         camera: { eye: eye(), target: [...target] as Vec3, tanHalfFov: Math.tan(FOV / 2) },
-        orbit: { azimuth, polar, distance: ORBIT_DISTANCE, fovDegrees: 35 },
+        orbit: { azimuth, polar, distance: ORBIT_DISTANCE, fovDegrees: (FOV * 180) / Math.PI },
       };
     },
     // Pauses the live loop, restarts the simulation from nothing and renders the job frame by frame.

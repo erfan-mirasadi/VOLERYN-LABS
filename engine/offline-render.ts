@@ -45,8 +45,6 @@ export type OfflineContext = {
   step: (dt: number) => number;
 };
 
-const LAYER_INDEX: Record<Exclude<Plane, 'display'>, number> = { fire: 0, firelight: 1, smoke: 2, data: 3 };
-
 export function halton(index: number, base: number) {
   let f = 1;
   let r = 0;
@@ -150,7 +148,7 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
       renderer.drawDisplay(encoder, targets);
       renderer.drawPreview(encoder, ctx.context.getCurrentTexture().createView(), [ctx.canvas.width, ctx.canvas.height], targets);
       job.read.forEach((plane, p) => {
-        const texture = plane === 'display' ? targets.display : targets.layers[LAYER_INDEX[plane]];
+        const texture = plane === 'display' ? targets.display : targets.layers[plane];
         encoder.copyTextureToBuffer({ texture }, { buffer, offset: p * planeBytes, bytesPerRow, rowsPerImage: job.height }, [job.width, job.height]);
       });
       device.queue.submit([encoder.finish()]);

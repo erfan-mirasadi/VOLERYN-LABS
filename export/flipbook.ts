@@ -4,8 +4,6 @@ import { halves, toRgba } from './planes';
 // Motion sheets map this much UV per frame onto the full byte range; faster motion clamps.
 export const MOTION_RANGE = 0.1;
 
-export type Sheet = ReturnType<typeof createSheet>;
-
 // A square-celled sheet filled row by row from the top left: 8-bit colour, and optionally a motion sheet whose R
 // and G hold the UV each pixel moves to the next frame, 128 meaning still. V runs down for Unreal, up for Unity.
 export function createSheet(cols: number, rows: number, cell: number, straight: boolean, motion: 'off' | 'unreal' | 'unity') {
@@ -13,7 +11,7 @@ export function createSheet(cols: number, rows: number, cell: number, straight: 
   const height = rows * cell;
   const colour = new Uint8Array(width * height * 4);
   const vectors = motion === 'off' ? null : new Uint8Array(width * height * 4);
-  if (vectors) for (let i = 0; i < vectors.length; i += 4) vectors.set([128, 128, 0, 255], i);
+  if (vectors) new Uint32Array(vectors.buffer).fill(0xff008080);
   const encode = (uv: number) => Math.round(Math.min(Math.max(0.5 + uv / (2 * MOTION_RANGE), 0), 1) * 255);
 
   function place(frame: RenderedFrame) {
