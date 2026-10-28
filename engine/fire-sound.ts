@@ -1,0 +1,133 @@
+import type { Vec3 } from './render';
+import { type Box, BOX_MAX, BOX_MIN, GRID, type Preset, type Tweaks } from './scene';
+
+const NOISE_SECONDS = 2;
+// The loops replay one noise buffer at unrelated rates, so no repeat is ever audible.
+const BED_RATE = 0.31;
+const AIR_RATE = 0.73;
+const FLUTTER_RATE = 0.017;
+const MASTER = 0.8;
+
+export type FireSound = ReturnType<typeof createFireSound>;
+
+export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
+  const rate = ctx.sampleRate;
+  const noise = ctx.createBuffer(1, NOISE_SECONDS * rate, rate);
+  const noiseData = noise.getChannelData(0);
+  for (let i = 0; i < noiseData.length; i++) noiseData[i] = Math.random() * 2 - 1;
+
+  const glide = (param: AudioParam, value: number, tau = 0.1) => {
+    param.cancelScheduledValues(ctx.currentTime);
+    param.setTargetAtTime(value, ctx.currentTime, tau);
+  };
+  const gain = (value = 0) => new GainNode(ctx, { gain: value });
+  const filter = (type: BiquadFilterType, frequency: number, Q = 0.7) => new BiquadFilterNode(ctx, { type, frequency, Q });
+  const loop = (playbackRate: number) => {
+    const source = new AudioBufferSourceNode(ctx, { buffer: noise, loop: true, playbackRate });
+    source.start(0, Math.random() * NOISE_SECONDS);
+    return source;
+  };
+  const panner = () => new PannerNode(ctx, { panningModel: 'equalpower', distanceModel: 'inverse', refDistance: orbitDistance });
+  // RMS of the flutter noise after a lowpass at cutoff, so a depth means the same at any cutoff and sample rate.
+  const flutterRms = (cutoff: number) => 0.577 * Math.sqrt((1.11 * cutoff) / ((FLUTTER_RATE * rate) / 2));
+
+  const compressor = new DynamicsCompressorNode(ctx, { threshold: -12, knee: 6, ratio: 4, attack: 0.003, release: 0.25 });
+  const master = gain();
+  const analyser = new AnalyserNode(ctx, { fftSize: 2048 });
+  compressor.connect(master).connect(analyser).connect(ctx.destination);
+  const base = panner();
+  const plume = panner();
+  base.connect(compressor);
+  plume.connect(compressor);
+
+  const body = gain(1);
+  body.connect(base);
+  const bed = loop(BED_RATE);
+  const rumble = gain();
+  const roarFilter = filter('lowpass', 500);
+  const roar = gain();
+  bed.connect(filter('lowpass', 110)).connect(rumble).connect(body);
+  bed.connect(roarFilter).connect(roar).connect(body);
+
+  const flutter = loop(FLUTTER_RATE);
+  const puffFilter = filter('lowpass', 4);
+  const puff = gain();
+  const gust = gain();
+  flutter.connect(puffFilter).connect(puff).connect(body.gain);
+  flutter.connect(filter('lowpass', 0.4)).connect(gust);
+
+  const air = loop(AIR_RATE);
+  const hiss = gain();
+  const wind = gain();
+  air.connect(filter('bandpass', 2200)).connect(hiss).connect(plume);
+  air.connect(filter('lowpass', 400, 0.5)).connect(wind).connect(plume);
+  gust.connect(wind.gain);
+
+  const world = (cell: number, axis: 0 | 1 | 2) => BOX_MIN[axis] + ((cell + 0.5) / GRID[axis]) * (BOX_MAX[axis] - BOX_MIN[axis]);
+  const place = (node: PannerNode, cell: readonly number[], lean: number, rise: number) => {
+    glide(node.positionX, world(cell[0], 0) + lean);
+    glide(node.positionY, world(cell[1], 1) + rise);
+    glide(node.positionZ, world(cell[2], 2));
+  };
+
+  function scene(preset: Preset, tweaks: Tweaks, boxes: Box[]) {
+    const h = tweaks.heat;
+    const w = Math.abs(tweaks.wind) / 60;
+    const objects = preset.mode === 'objects';
+    // Emitting cells: the 2.5-cell skin at mean weight 0.5 around each box, or the (1 - d²) ball of the fire kernel.
+    const cells = objects
+      ? boxes.reduce((sum, b) => sum + 10 * (b.hx * b.hy + b.hy * b.hz + b.hz * b.hx), 0)
+      : 0.4 * (4 / 3) * Math.PI * preset.radius ** 3;
+    const burning = preset.mode !== 'explosion';
+    const power = burning ? (preset.emit * preset.heat * h * cells) / 47600 : 0;
+    const flow = burning ? (preset.emit * cells) / 36600 : 0;
+    const centre = objects ? ([0, 1, 2] as const).map((axis) => boxes.reduce((sum, b) => sum + [b.x, b.y, b.z][axis], 0) / boxes.length) : preset.emitter;
+    place(base, centre, 0, 0);
+    place(plume, centre, (0.5 * tweaks.wind) / 60, 0.7);
+
+    glide(rumble.gain, 0.35 * Math.sqrt(power));
+    glide(roar.gain, 0.3 * Math.sqrt(power));
+    glide(roarFilter.frequency, 250 + 350 * Math.min(1.5, (preset.buoyancy * h) / 40));
+    const puffRate = 2.5 * Math.sqrt((preset.buoyancy * h) / 32) + 0.5 * tweaks.vorticity + 2 * w;
+    glide(puffFilter.frequency, puffRate);
+    glide(puff.gain, (0.25 + (0.5 * tweaks.vorticity) / 14) / flutterRms(puffRate));
+    glide(hiss.gain, Math.sqrt(flow) * (0.03 + (0.025 * preset.turbulence) / 60) + 0.08 * w);
+    const windLevel = 0.8 * w ** 1.5;
+    glide(wind.gain, windLevel);
+    glide(gust.gain, (0.6 * windLevel) / flutterRms(0.4));
+  }
+
+  function update() {}
+
+  function burst() {}
+
+  function listen(eye: Vec3, target: Vec3) {
+    const listener = ctx.listener;
+    const forward = [target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]] as Vec3;
+    // Firefox has no AudioParams on the listener.
+    if (!listener.positionX) {
+      listener.setPosition(...eye);
+      listener.setOrientation(...forward, 0, 1, 0);
+      return;
+    }
+    [listener.positionX, listener.positionY, listener.positionZ].forEach((param, i) => glide(param, eye[i], 0.03));
+    [listener.forwardX, listener.forwardY, listener.forwardZ].forEach((param, i) => glide(param, forward[i], 0.03));
+  }
+
+  const samples = new Float32Array(analyser.fftSize);
+  function level() {
+    analyser.getFloatTimeDomainData(samples);
+    let sum = 0;
+    for (const sample of samples) sum += sample * sample;
+    return Math.max(-99, 10 * Math.log10(sum / samples.length));
+  }
+
+  return {
+    scene,
+    update,
+    burst,
+    listen,
+    level,
+    fade: (on: boolean) => glide(master.gain, on ? MASTER : 0, on ? 0.03 : 0.01),
+  };
+}
