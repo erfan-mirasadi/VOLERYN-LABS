@@ -1,3 +1,4 @@
+import { createFireSound, type FireSound } from './fire-sound';
 import { requestGpu } from './gpu';
 import { GpuTimer } from './gpu-timer';
 import { createRenderer, type Vec3 } from './render';
@@ -30,6 +31,7 @@ export type EngineStats = {
   grid: readonly number[];
   adapterName: string;
   hasTimestamps: boolean;
+  sound: number | AudioContextState | 'off';
 };
 
 export type Engine = Awaited<ReturnType<typeof createEngine>>;
@@ -54,6 +56,9 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   let running = true;
   let visible = true;
   let looping = false;
+  let audio: AudioContext | null = null;
+  let sound: FireSound | null = null;
+  let soundOn = false;
 
   const target: Vec3 = [0, 0.72, 0];
   let azimuth = 0.5;
@@ -95,6 +100,25 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     }
   }
 
+  // Sound plays only while the loop runs; it fades out before the context stops so pausing never clicks.
+  function syncSound() {
+    if (!audio || !sound) return;
+    const audible = soundOn && visible && running;
+    sound.fade(audible);
+    if (audible) {
+      void audio.resume();
+      return;
+    }
+    setTimeout(() => {
+      if (audio && !(soundOn && visible && running)) void audio.suspend();
+    }, 80);
+  }
+
+  function startBurst() {
+    burstStart = simTime;
+    if (soundOn && preset.mode === 'explosion') sound?.burst();
+  }
+
   function tick(now: number) {
     if (!running || !visible) {
       looping = false;
@@ -115,7 +139,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     const encoder = device.createCommandEncoder();
     const simulationPass = encoder.beginComputePass({ timestampWrites: timer.timestamps('simulation') });
     for (let n = 0; accumulator >= DT && n < 2; n++) {
-      if (preset.mode === 'explosion' && simTime - burstStart > BURST_EVERY) burstStart = simTime;
+      if (preset.mode === 'explosion' && simTime - burstStart > BURST_EVERY) startBurst();
       const emitting = preset.mode !== 'explosion' || simTime - burstStart < BURST_LENGTH;
       simulation.writeParams(preset, tweaks, boxes, simTime, emitting);
       simulation.step(simulationPass);
@@ -142,6 +166,10 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     const collect = timer.resolve(encoder);
     device.queue.submit([encoder.finish()]);
     collect();
+    if (soundOn && sound) {
+      if (drag || spinning) sound.listen(eye(), target);
+      sound.update();
+    }
 
     fpsFrames++;
     if (now - fpsSince > 1000) {
@@ -197,17 +225,20 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   // Only simulate while the canvas is on screen, so the rest of the page costs no GPU time.
   const visibilityObserver = new IntersectionObserver((entries) => {
     visible = entries.some((entry) => entry.isIntersecting) && !document.hidden;
+    syncSound();
     if (visible) startLoop();
   });
   visibilityObserver.observe(canvas);
   const onVisibilityChange = () => {
     visible = !document.hidden;
+    syncSound();
     if (visible) startLoop();
   };
   document.addEventListener('visibilitychange', onVisibilityChange);
 
   const onDeviceLost = device.lost.then((info) => {
     running = false;
+    syncSound();
     return info;
   });
 
@@ -222,13 +253,27 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       boxes = next.objects?.map((box) => ({ ...box })) ?? [];
       simulation.clear();
       renderer.resetHistory();
-      burstStart = simTime;
+      sound?.scene(preset, tweaks, boxes);
+      startBurst();
     },
     setTweaks(next: Partial<Tweaks>) {
       tweaks = { ...tweaks, ...next };
+      sound?.scene(preset, tweaks, boxes);
     },
     addBox(box: Box) {
       boxes = [...boxes, box].slice(-MAX_BOXES);
+      sound?.scene(preset, tweaks, boxes);
+    },
+    // Called inside the click: browsers only start an AudioContext during a user gesture.
+    setSound(on: boolean) {
+      soundOn = on;
+      if (on && !audio) {
+        audio = new AudioContext();
+        sound = createFireSound(audio, ORBIT_DISTANCE);
+        sound.scene(preset, tweaks, boxes);
+        sound.listen(eye(), target);
+      }
+      syncSound();
     },
     stats(): EngineStats {
       const times = timer.averages();
@@ -247,9 +292,12 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
         grid: GRID,
         adapterName,
         hasTimestamps,
+        sound: !soundOn || !audio || !sound ? 'off' : audio.state === 'running' ? sound.level() : audio.state,
       };
     },
     dispose() {
+      void audio?.close();
+      audio = null;
       running = false;
       cancelAnimationFrame(frame);
       resizeObserver.disconnect();
