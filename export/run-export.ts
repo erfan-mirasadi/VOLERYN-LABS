@@ -48,6 +48,14 @@ export const DEFAULT_SETTINGS: ExportSettings = {
 
 export type Progress = { done: number; total: number; msPerFrame: number };
 
+// What a sheet holds: its cells span the clip at the playback rate the stride leaves.
+export function flipbookTiming({ grid, seconds }: ExportSettings) {
+  const [cols, rows] = grid.split('x').map(Number);
+  const cells = cols * rows;
+  const stride = Math.ceil((seconds * FLIPBOOK_FPS) / cells);
+  return { cols, rows, cells, stride, seconds: (cells * stride) / FLIPBOOK_FPS, fps: FLIPBOOK_FPS / stride };
+}
+
 type Sink = { frame(frame: RenderedFrame): Promise<void>; finish(): Promise<void>; abort?(): Promise<void> };
 
 export function folderName(presetId: string, seed: number) {
@@ -61,15 +69,14 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
   const explosion = preset.mode === 'explosion';
   const flipbook = settings.mode === 'flipbook';
   const exr = settings.mode === 'sequence' && settings.format === 'exr';
-  const [cols, rows] = settings.grid.split('x').map(Number);
+  const { cols, rows, cells, stride } = flipbookTiming(settings);
   const [width, height] = flipbook ? [settings.cell, settings.cell] : settings.size.split('x').map(Number);
-  const cells = cols * rows;
   const job: OfflineJob = {
     width,
     height,
     fps: flipbook ? FLIPBOOK_FPS : settings.fps,
     frames: flipbook ? cells : settings.seconds * settings.fps,
-    stride: flipbook ? Math.ceil((settings.seconds * FLIPBOOK_FPS) / cells) : 1,
+    stride: flipbook ? stride : 1,
     warmup: explosion ? 0 : WARMUP,
     samples: settings.samples,
     camera: flipbook ? fitCamera(snapshot.camera.eye, FLIPBOOK_FOV) : snapshot.camera,
@@ -193,7 +200,7 @@ const frameName = (id: string, index: number, extension: string) => `${id}.${Str
 
 function pngSink(destination: Destination, id: string, settings: ExportSettings): Sink {
   return {
-    frame: async (frame) => destination.write(frameName(id, frame.index, 'png'), await encodePng(frame.width, frame.height, settings.bits, toRgba(frame, settings.bits, settings.alpha === 'straight'))),
+    frame: async (frame) => destination.write(frameName(id, frame.index, 'png'), await encodePng(frame.width, frame.height, settings.bits, toRgba(frame, settings.bits, settings.alpha === 'straight' && 'display'))),
     finish: async () => {},
   };
 }

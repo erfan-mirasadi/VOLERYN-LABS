@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react';
 import { openDestination } from '@/export/files';
-import { DEFAULT_SETTINGS, type ExportSettings, folderName, type Progress, runExport, SIZES } from '@/export/run-export';
+import { DEFAULT_SETTINGS, type ExportSettings, flipbookTiming, folderName, type Progress, runExport, SIZES } from '@/export/run-export';
 import { presetById } from '@/presets/presets';
 import { chip } from './SimulationPanel';
 import { useStudioStore } from './useStudioStore';
@@ -45,6 +45,7 @@ export default function ExportPanel() {
   const explosion = presetById(presetId).mode === 'explosion';
   const set = (patch: Partial<ExportSettings>) => setSettings((current) => ({ ...current, ...patch }));
   const rows = ROWS.filter((row) => row.modes.includes(settings.mode) && !row.hidden?.(settings));
+  const sheet = settings.mode === 'flipbook' ? flipbookTiming(settings) : null;
 
   async function render() {
     if (!engine) return;
@@ -101,6 +102,11 @@ export default function ExportPanel() {
             </select>
           </label>
         ))}
+        {sheet && (
+          <p className="col-span-2 font-mono text-xs tabular-nums text-muted">
+            {sheet.cells} cells · {sheet.seconds.toFixed(1)} s · {+sheet.fps.toFixed(2)} fps playback
+          </p>
+        )}
       </div>
       <label className="flex items-center gap-2">
         <input type="checkbox" checked={settings.loop && !explosion} disabled={exporting || explosion} onChange={(event) => set({ loop: event.target.checked })} className="accent-ember" />

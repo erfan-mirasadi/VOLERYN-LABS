@@ -35,15 +35,15 @@ function toI420(rgba: Uint8Array, width: number, height: number) {
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const i = (y * width + x) * 4;
-      out[y * width + x] = 16 + ((47 * rgba[i] + 157 * rgba[i + 1] + 16 * rgba[i + 2]) >> 8);
+      out[y * width + x] = 16 + ((47 * rgba[i] + 157 * rgba[i + 1] + 16 * rgba[i + 2] + 128) >> 8);
       if ((x | y) & 1) continue;
       const j = i + width * 4;
       const r = rgba[i] + rgba[i + 4] + rgba[j] + rgba[j + 4];
       const g = rgba[i + 1] + rgba[i + 5] + rgba[j + 1] + rgba[j + 5];
       const b = rgba[i + 2] + rgba[i + 6] + rgba[j + 2] + rgba[j + 6];
       const c = (y >> 1) * (width >> 1) + (x >> 1);
-      out[luma + c] = 128 + ((-26 * r - 87 * g + 112 * b) >> 10);
-      out[luma + chroma + c] = 128 + ((112 * r - 102 * g - 10 * b) >> 10);
+      out[luma + c] = 128 + ((-26 * r - 87 * g + 112 * b + 512) >> 10);
+      out[luma + chroma + c] = 128 + ((112 * r - 102 * g - 10 * b + 512) >> 10);
     }
   }
   return out;

@@ -9,9 +9,13 @@ const FAR = 1e10;
 let halfTable: Float32Array | undefined;
 export const halves = () => (halfTable ??= new Float32Array(new Float16Array(Uint16Array.from({ length: 65536 }, (_, i) => i).buffer)));
 
+const decode = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+const encode = (c: number) => (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055);
+
 // The display plane as packed 8- or 16-bit RGBA. Straight alpha is raised to the brightest channel, so a bare flame,
-// which covers nothing, still survives the division.
-export function toRgba({ width, height, stride, planes }: RenderedFrame, bits: 8 | 16, straight: boolean): Bytes {
+// which covers nothing, still survives the division. A compositor blends the display values as they are; a game
+// engine decodes them to linear light first, so a sheet is unpremultiplied there.
+export function toRgba({ width, height, stride, planes }: RenderedFrame, bits: 8 | 16, straight: false | 'display' | 'linear'): Bytes {
   const display = planes.display!;
   const half = halves();
   const peak = bits === 8 ? 255 : 65535;
@@ -30,12 +34,10 @@ export function toRgba({ width, height, stride, planes }: RenderedFrame, bits: 8
       let b = half[display[i + 2]];
       let a = half[display[i + 3]];
       if (straight) {
+        if (straight === 'linear') [r, g, b] = [decode(r), decode(g), decode(b)];
         a = Math.max(a, r, g, b);
-        if (a > 0) {
-          r /= a;
-          g /= a;
-          b /= a;
-        }
+        if (a > 0) [r, g, b] = [r / a, g / a, b / a];
+        if (straight === 'linear') [r, g, b] = [encode(r), encode(g), encode(b)];
       }
       put(r);
       put(g);

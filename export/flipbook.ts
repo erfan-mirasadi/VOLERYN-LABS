@@ -17,7 +17,7 @@ export function createSheet(cols: number, rows: number, cell: number, straight: 
   function place(frame: RenderedFrame) {
     const left = (frame.index % cols) * cell;
     const top = Math.floor(frame.index / cols) * cell;
-    const rgba = toRgba(frame, 8, straight);
+    const rgba = toRgba(frame, 8, straight && 'linear');
     for (let y = 0; y < cell; y++) colour.set(rgba.subarray(y * cell * 4, (y + 1) * cell * 4), ((top + y) * width + left) * 4);
     if (!vectors) return;
     const data = frame.planes.data!;
