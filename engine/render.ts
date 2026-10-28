@@ -1,4 +1,4 @@
-import { COMPOSITE, RENDER, RESOLVE } from './render-shaders';
+import { COMPOSITE, DISPLAY, RENDER, RESOLVE } from './render-shaders';
 import { DENSITY, EXPOSURE, FIRE_LIGHT, FLOW_PERIOD, GRID, type Preset } from './scene';
 import type { Volumes } from './simulation';
 
@@ -6,6 +6,10 @@ const VIEW_FLOATS = 40;
 const TARGET_FORMAT: GPUTextureFormat = 'rgba16float';
 const LIVE_STEP_CELLS = 1.5;
 const LIVE_MAX_STEPS = 160;
+// The export marches twice as densely and sums its samples by blending, so N samples make an exact mean.
+export const EXPORT_STEP_CELLS = 0.75;
+const EXPORT_MAX_STEPS = 320;
+const ADD: GPUBlendComponent = { srcFactor: 'one', dstFactor: 'one', operation: 'add' };
 export const BOX_MIN: Vec3 = [-0.5, 0, (-0.5 * GRID[2]) / GRID[0]];
 export const BOX_MAX: Vec3 = [0.5, GRID[1] / GRID[0], (0.5 * GRID[2]) / GRID[0]];
 
@@ -44,7 +48,21 @@ type ViewParams = {
   frameTime: number;
 };
 
+export type ExportSample = {
+  camera: Camera;
+  preset: Preset;
+  time: number;
+  // Which scalar volume to read: the current state or the loop blend.
+  source: number;
+  jitter: [number, number];
+  frame: number;
+  weight: number;
+  frameTime: number;
+  first: boolean;
+};
+
 export type Renderer = ReturnType<typeof createRenderer>;
+export type ExportTargets = ReturnType<Renderer['createExportTargets']>;
 
 export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volumes: Volumes) {
   const pipeline = (module: GPUShaderModule, entryPoint: string, targets: GPUColorTargetState[]) =>
@@ -62,23 +80,31 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
 
   const viewBuffer = device.createBuffer({ size: VIEW_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const blendBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const raymarchGroups = volumes.scalars.map((scalars, j) =>
-    device.createBindGroup({
-      layout: raymarch.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: viewBuffer } },
-        { binding: 1, resource: scalars.createView() },
-        { binding: 2, resource: volumes.shadow.createView() },
-        { binding: 3, resource: volumes.sampler },
-        { binding: 4, resource: { buffer: volumes.params } },
-        { binding: 5, resource: volumes.light.createView() },
-        { binding: 6, resource: volumes.noise.values.createView() },
-        { binding: 7, resource: volumes.noise.repeat },
-        { binding: 8, resource: volumes.flows[j][0].createView() },
-        { binding: 9, resource: volumes.flows[j][1].createView() },
-      ],
-    }),
-  );
+  const volumeEntries = (j: number): GPUBindGroupEntry[] => [
+    { binding: 0, resource: { buffer: viewBuffer } },
+    { binding: 1, resource: volumes.scalars[j].createView() },
+    { binding: 2, resource: volumes.shadow.createView() },
+    { binding: 3, resource: volumes.sampler },
+    { binding: 4, resource: { buffer: volumes.params } },
+    { binding: 5, resource: volumes.light.createView() },
+    { binding: 6, resource: volumes.noise.values.createView() },
+    { binding: 7, resource: volumes.noise.repeat },
+    { binding: 8, resource: volumes.flows[j][0].createView() },
+    { binding: 9, resource: volumes.flows[j][1].createView() },
+  ];
+  const raymarchGroups = volumes.scalars.map((_, j) => device.createBindGroup({ layout: raymarch.getBindGroupLayout(0), entries: volumeEntries(j) }));
+
+  // Export pipelines and bind groups are made on the first export, so the landing page's hero pays nothing for them.
+  let exportPipelines: { march: GPURenderPipeline; display: GPURenderPipeline; groups: GPUBindGroup[] } | null = null;
+  function exportResources() {
+    if (exportPipelines) return exportPipelines;
+    const march = pipeline(renderModule, 'fsExport', Array.from({ length: 4 }, () => ({ format: TARGET_FORMAT, blend: { color: ADD, alpha: ADD } })));
+    const groups = volumes.scalars.map((_, j) =>
+      device.createBindGroup({ layout: march.getBindGroupLayout(0), entries: [...volumeEntries(j), { binding: 10, resource: volumes.velocity.createView() }] }),
+    );
+    exportPipelines = { march, display: fullscreen(DISPLAY, TARGET_FORMAT), groups };
+    return exportPipelines;
+  }
 
   let targets: { width: number; height: number; current: GPUTexture; history: GPUTexture[]; resolveGroups: GPUBindGroup[]; compositeGroups: GPUBindGroup[] } | null = null;
   let historyIndex = 0;
@@ -171,8 +197,76 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     historyValid = true;
   }
 
+  // The light groups and the data target, the tonemapped display frame, and the groups that read them.
+  function createExportTargets(width: number, height: number) {
+    const { display: displayPipeline } = exportResources();
+    const make = () =>
+      device.createTexture({ size: [width, height], format: TARGET_FORMAT, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
+    const layers = [make(), make(), make(), make()];
+    const display = make();
+    return {
+      width,
+      height,
+      layers,
+      display,
+      displayGroup: device.createBindGroup({
+        layout: displayPipeline.getBindGroupLayout(0),
+        entries: layers.slice(0, 3).map((layer, binding) => ({ binding, resource: layer.createView() })),
+      }),
+      previewGroup: device.createBindGroup({
+        layout: composite.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: display.createView() },
+          { binding: 1, resource: volumes.sampler },
+        ],
+      }),
+      destroy() {
+        for (const texture of [...layers, display]) texture.destroy();
+      },
+    };
+  }
+
+  // One sample of an export frame, in its own submit: the view uniform is written before the queue runs, and a
+  // short command buffer stays clear of the GPU watchdog even at 4K.
+  function drawExportSample(targets: ExportTargets, sample: ExportSample) {
+    const { march, groups } = exportResources();
+    const { width, height } = targets;
+    writeView({ ...sample, width, height, stepCells: EXPORT_STEP_CELLS, maxSteps: EXPORT_MAX_STEPS, sampleWeight: sample.weight });
+    const loadOp: GPULoadOp = sample.first ? 'clear' : 'load';
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({
+      colorAttachments: targets.layers.map((layer) => ({ view: layer.createView(), loadOp, storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } })),
+    });
+    pass.setPipeline(march);
+    pass.setBindGroup(0, groups[sample.source]);
+    pass.draw(3);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+  }
+
+  function drawDisplay(encoder: GPUCommandEncoder, targets: ExportTargets) {
+    fullscreenPass(encoder, targets.display.createView(), exportResources().display, targets.displayGroup);
+  }
+
+  // The finished frame letterboxed on the canvas, so the viewport shows the export as it renders.
+  function drawPreview(encoder: GPUCommandEncoder, canvasView: GPUTextureView, [canvasWidth, canvasHeight]: [number, number], targets: ExportTargets) {
+    const scale = Math.min(canvasWidth / targets.width, canvasHeight / targets.height);
+    const width = Math.floor(targets.width * scale);
+    const height = Math.floor(targets.height * scale);
+    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: canvasView, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+    pass.setViewport((canvasWidth - width) / 2, (canvasHeight - height) / 2, width, height, 0, 1);
+    pass.setPipeline(composite);
+    pass.setBindGroup(0, targets.previewGroup);
+    pass.draw(3);
+    pass.end();
+  }
+
   return {
     draw,
+    createExportTargets,
+    drawExportSample,
+    drawDisplay,
+    drawPreview,
     resetHistory: () => {
       historyValid = false;
     },

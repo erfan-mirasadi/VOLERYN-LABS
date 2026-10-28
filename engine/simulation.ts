@@ -14,18 +14,22 @@ import {
   SHADOW_GRID,
   type Tweaks,
 } from './scene';
-import { CLEAR, EMISSION, HEADER, LIGHT_BLUR, SHADERS } from './simulation-shaders';
+import { CLEAR, EMISSION, HEADER, LIGHT_BLUR, MIX, SHADERS } from './simulation-shaders';
 
 const PARAM_FLOATS = 64;
 const FLOW_GRID = GRID.map((n) => n / 2) as [number, number, number];
 // The residual readback skips the sponge under the lid, where the open top is only approximate.
 const LIVE_HEIGHT = Math.floor(GRID[1] * 0.8);
 const ROW_BYTES = Math.ceil((GRID[0] * 4) / 256) * 256;
+// Index of the loop blend among the scalar and flow volumes; the solver never reads it, only lighting and rendering.
+export const LOOP_SOURCE = 2;
 
 export type Volumes = {
-  scalars: [GPUTexture, GPUTexture];
+  // The two states the step ping-pongs between, then the loop blend of the current state toward a kept one.
+  scalars: GPUTexture[];
   // Per scalar index, the two displacement fields the flame detail rides on.
   flows: [GPUTexture, GPUTexture][];
+  velocity: GPUTexture;
   shadow: GPUTexture;
   light: GPUTexture;
   params: GPUBuffer;
@@ -40,15 +44,17 @@ export type Simulation = ReturnType<typeof createSimulation>;
 export function createSimulation(device: GPUDevice) {
   const volume = (format: GPUTextureFormat, size: readonly number[] = GRID, usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING) =>
     device.createTexture({ size: [...size], dimension: '3d', format, usage });
+  const copyable = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC;
   // Velocity on the cell faces: the state, then within a step the advected field and the field with forces added.
   const velocity = volume('rgba16float');
   const advected = volume('rgba16float');
   const forced = volume('rgba16float');
   // A spare volume: the MacCormack prediction, then the cell-centred forces.
   const scratch = volume('rgba16float');
-  const scalars: [GPUTexture, GPUTexture] = [volume('rgba16float'), volume('rgba16float')];
+  const states = [0, 1, LOOP_SOURCE];
+  const scalars = states.map(() => volume('rgba16float', GRID, copyable));
   // The displacement fields are smooth, so half the grid carries them at an eighth of the fetch footprint.
-  const flows: [GPUTexture, GPUTexture][] = [0, 1].map(() => [volume('rgba16float', FLOW_GRID), volume('rgba16float', FLOW_GRID)]);
+  const flows: [GPUTexture, GPUTexture][] = states.map(() => [volume('rgba16float', FLOW_GRID, copyable), volume('rgba16float', FLOW_GRID, copyable)]);
   const curl = volume('rgba16float');
   const divergence = volume('r32float', GRID, GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC);
   const shadow = volume('rgba16float', SHADOW_GRID);
@@ -64,6 +70,7 @@ export function createSimulation(device: GPUDevice) {
   // A frame may run two steps before it submits, and writing one buffer twice would hand both steps the second
   // step's params, so each step slot has its own.
   const paramSlots = both(() => device.createBuffer({ size: PARAM_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
+  const blend = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const staging = device.createBuffer({ size: ROW_BYTES * GRID[1] * GRID[2], usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   const pressure = createPressureSolver(device, paramSlots[0], divergence);
   const noise = createNoiseTextures(device);
@@ -78,6 +85,7 @@ export function createSimulation(device: GPUDevice) {
   const clearFloat = compute(CLEAR('r32float'));
   const emission = compute(EMISSION(LIGHT_SCALE));
   const lightBlur = [compute(LIGHT_BLUR, { dilate: 0 }), compute(LIGHT_BLUR, { dilate: 1 })];
+  const mix = compute(MIX);
 
   const bind = (pipeline: GPUComputePipeline, resources: (GPUBuffer | GPUTexture | GPUSampler)[]) => bindResources(device, pipeline, resources);
   // The step's bind groups, one set per params slot.
@@ -95,8 +103,8 @@ export function createSimulation(device: GPUDevice) {
   }));
   const residual = both((j) => bind(pipelines.divergence, [paramSlots[0], velocity, divergence, scalars[j], pressure.solid]));
   const lighting = {
-    shadow: both((j) => bind(pipelines.shadow, [paramSlots[0], scalars[j], sampler, shadow])),
-    emission: both((j) => bind(emission, [scalars[j], light[0]])),
+    shadow: states.map((j) => bind(pipelines.shadow, [paramSlots[0], scalars[j], sampler, shadow])),
+    emission: states.map((j) => bind(emission, [scalars[j], light[0]])),
     blur: lightBlur.map((pipeline) => both((k) => bind(pipeline, [light[k], light[1 - k]]))),
   };
   const clearGroups = [
@@ -157,13 +165,43 @@ export function createSimulation(device: GPUDevice) {
 
   // The shadow volume and the flame's light volume, both read by the render; the blur ping-pongs and ends in light[0].
   // The first two blurs also dilate the occupancy by two coarse cells, the margin the raymarch's empty-space skip needs.
-  function updateLighting(pass: GPUComputePassEncoder) {
-    run(pass, pipelines.shadow, lighting.shadow[sc], shadowWorkgroups);
-    run(pass, emission, lighting.emission[sc], lightWorkgroups);
+  function updateLighting(pass: GPUComputePassEncoder, source = sc) {
+    run(pass, pipelines.shadow, lighting.shadow[source], shadowWorkgroups);
+    run(pass, emission, lighting.emission[source], lightWorkgroups);
     for (let i = 0; i < LIGHT_BLUR_PASSES * 2; i++) {
       const dilate = i < 2 ? 1 : 0;
       run(pass, lightBlur[dilate], lighting.blur[dilate][i % 2], lightWorkgroups);
     }
+  }
+
+  // Frames kept for the loop: the state and its flow fields, copied whole.
+  const kept: { scalars: GPUTexture; flows: GPUTexture[] }[] = [];
+  const keepable = (size: readonly number[]) =>
+    device.createTexture({ size: [...size], dimension: '3d', format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+
+  function keepFrame(i: number) {
+    kept[i] ??= { scalars: keepable(GRID), flows: [keepable(FLOW_GRID), keepable(FLOW_GRID)] };
+    const encoder = device.createCommandEncoder();
+    encoder.copyTextureToTexture({ texture: scalars[sc] }, { texture: kept[i].scalars }, [...GRID]);
+    flows[sc].forEach((flow, k) => encoder.copyTextureToTexture({ texture: flow }, { texture: kept[i].flows[k] }, [...FLOW_GRID]));
+    device.queue.submit([encoder.finish()]);
+  }
+
+  // Blends the current state toward kept frame i into the loop volumes. Its own submit: the weight is written
+  // before the queue runs, so two blends in one command buffer would both see the second weight.
+  function blendLoop(i: number, weight: number) {
+    device.queue.writeBuffer(blend, 0, new Float32Array([weight]));
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    run(pass, mix, bind(mix, [blend, scalars[sc], kept[i].scalars, scalars[LOOP_SOURCE]]));
+    flows[sc].forEach((flow, k) => run(pass, mix, bind(mix, [blend, flow, kept[i].flows[k], flows[LOOP_SOURCE][k]]), flowWorkgroups));
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+  }
+
+  function releaseKept() {
+    for (const frame of kept) [frame.scalars, ...frame.flows].forEach((texture) => texture.destroy());
+    kept.length = 0;
   }
 
   let reading = false;
@@ -202,14 +240,14 @@ export function createSimulation(device: GPUDevice) {
   }
 
   function dispose() {
+    releaseKept();
     for (const texture of [velocity, advected, forced, scratch, ...scalars, ...flows.flat(), curl, divergence, shadow, ...light]) texture.destroy();
     noise.values.destroy();
     noise.curl.destroy();
     pressure.dispose();
-    for (const buffer of paramSlots) buffer.destroy();
-    staging.destroy();
+    for (const buffer of [...paramSlots, blend, staging]) buffer.destroy();
   }
 
-  const volumes: Volumes = { scalars, flows, shadow, light: light[0], params: paramSlots[0], sampler, noise };
-  return { volumes, writeParams, step, updateLighting, readResidual, clear, dispose, get scalarIndex() { return sc; } };
+  const volumes: Volumes = { scalars, flows, velocity, shadow, light: light[0], params: paramSlots[0], sampler, noise };
+  return { volumes, writeParams, step, updateLighting, keepFrame, blendLoop, releaseKept, readResidual, clear, dispose, get scalarIndex() { return sc; } };
 }

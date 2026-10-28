@@ -470,6 +470,20 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   textureStore(dst, c, vec4<f32>(sum / weight, occupancy));
 }`;
 
+// Blends the current field toward a kept one for the seamless loop; it runs on the scalars and the flow fields alike.
+export const MIX = /* wgsl */ `
+struct Blend { weight: f32 }
+@group(0) @binding(0) var<uniform> B: Blend;
+@group(0) @binding(1) var now: texture_3d<f32>;
+@group(0) @binding(2) var kept: texture_3d<f32>;
+@group(0) @binding(3) var dst: texture_storage_3d<rgba16float, write>;
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (any(id >= textureDimensions(dst))) { return; }
+  let c = vec3<i32>(id);
+  textureStore(dst, c, mix(textureLoad(now, c, 0), textureLoad(kept, c, 0), B.weight));
+}`;
+
 export const CLEAR = (format: 'rgba16float' | 'r32float') => /* wgsl */ `
 @group(0) @binding(0) var dst: texture_storage_3d<${format}, write>;
 @compute @workgroup_size(4, 4, 4)
