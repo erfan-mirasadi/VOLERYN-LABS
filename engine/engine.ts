@@ -1,13 +1,12 @@
 import { requestGpu } from './gpu';
 import { GpuTimer } from './gpu-timer';
 import { createRenderer, type Vec3 } from './render';
-import { type Box, DT, GRID, MAX_BOXES, type Preset, type Tweaks } from './scene';
+import { BLAST_DECAY, type Box, DT, GRID, MAX_BOXES, type Preset, type Tweaks } from './scene';
 import { createSimulation } from './simulation';
 
 const FOV = (35 * Math.PI) / 180;
 const ORBIT_DISTANCE = 3;
 const MAX_PIXEL_RATIO = 2;
-const BURST_LENGTH = 0.3;
 const BURST_EVERY = 5;
 const TAA_BLEND = 0.2;
 const TAA_BLEND_MOVING = 0.5;
@@ -118,8 +117,10 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     const simulationPass = encoder.beginComputePass({ timestampWrites: timer.timestamps('simulation') });
     for (let n = 0; accumulator >= DT && n < 2; n++) {
       if (preset.mode === 'explosion' && simTime - burstStart > BURST_EVERY) burstStart = simTime;
-      const emitting = preset.mode !== 'explosion' || simTime - burstStart < BURST_LENGTH;
-      simulation.writeParams(preset, tweaks, boxes, simTime, emitting);
+      const age = simTime - burstStart;
+      const emitting = preset.mode !== 'explosion' || age < (preset.burst ?? 0);
+      const blast = preset.mode === 'explosion' ? (preset.blast ?? 0) * Math.exp(-age / BLAST_DECAY) : 0;
+      simulation.writeParams(preset, tweaks, boxes, simTime, emitting, blast);
       simulation.step(simulationPass);
       accumulator -= DT;
       simTime += DT;

@@ -102,7 +102,7 @@ export function createSimulation(device: GPUDevice) {
   let sc = 0;
   const paramData = new Float32Array(PARAM_FLOATS);
 
-  function writeParams(preset: Preset, tweaks: Tweaks, boxes: Box[], time: number, emitting: boolean) {
+  function writeParams(preset: Preset, tweaks: Tweaks, boxes: Box[], time: number, emitting: boolean, blast: number) {
     const boxData = Array.from({ length: MAX_BOXES }, (_, i) => {
       const box = boxes[i];
       return box ? [box.x, box.y, box.z, box.yaw, box.hx, box.hy, box.hz, 1] : [0, 0, 0, 0, 0, 0, 0, 0];
@@ -114,7 +114,7 @@ export function createSimulation(device: GPUDevice) {
       ...preset.emitter, preset.radius,
       emitting ? preset.emit : 0, preset.smokeYield, preset.heat * tweaks.heat, preset.dissipation,
       ...LIGHT, MODE_INDEX[preset.mode],
-      preset.turbulence, preset.damping, preset.expansion, 0,
+      preset.turbulence, preset.damping, preset.expansion, blast,
       preset.ignite, 0, 0, 0,
       ...boxData,
     ]);

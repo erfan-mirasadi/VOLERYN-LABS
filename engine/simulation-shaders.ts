@@ -273,13 +273,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let drift = vec3<f32>(0.0, -P.time * 1.5, 0.0);
   let swirl = vec3<f32>(noise3(p * 0.12 + drift), noise3(p * 0.12 + drift + vec3<f32>(31.7, 0.0, 7.3)), noise3(p * 0.12 + drift + vec3<f32>(11.1, 0.0, 23.9))) - vec3<f32>(0.5);
   v += P.dt * P.turbulence * swirl * clamp(s.y + 0.3 * s.x, 0.0, 1.5);
-  let fromEmitter = p - P.emitter;
-  let d = length(fromEmitter) / P.radius;
+  let d = length(p - P.emitter) / P.radius;
   if (d < 1.0) {
     v.y += P.dt * P.emit * 0.8 * (1.0 - d);
-  }
-  if (P.mode == 2.0 && P.emit > 0.0 && d < 1.8) {
-    v += P.dt * P.emit * 1.5 * fromEmitter / max(length(fromEmitter), 0.5);
   }
   textureStore(dst, c, vec4<f32>(v, 0.0));
 }`,
@@ -322,8 +318,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let above = select(textureLoad(vel, clampc(c + Y), 0).y, v.y, c.y == n.y - 1);
   let front = select(textureLoad(vel, clampc(c + Z), 0).z, 0.0, c.z == n.z - 1);
   let div = (right - v.x) + (above - v.y) + (front - v.z);
-  // Burning gas expands: the solve targets this much divergence instead of none.
-  let expansion = P.expansion * textureLoad(sca, c, 0).w;
+  // Burning gas expands, and a blast pushes out from the charge: the solve targets this much divergence instead of
+  // none, so the push goes through the projection instead of being stripped by it.
+  let d = length(vec3<f32>(c) - P.emitter) / P.radius;
+  let expansion = P.expansion * textureLoad(sca, c, 0).w + P.blast * max(1.0 - d * d, 0.0);
   textureStore(dst, c, vec4<f32>(div - expansion, 0.0, 0.0, 0.0));
 }`,
   project: /* wgsl */ `
