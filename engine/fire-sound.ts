@@ -1,5 +1,5 @@
 import type { Vec3 } from './render';
-import { type Box, BOX_MAX, BOX_MIN, GRID, type Preset, type Tweaks } from './scene';
+import { type Box, BOX_MAX, BOX_MIN, BURST_LENGTH, GRID, type Preset, type Tweaks } from './scene';
 
 const NOISE_SECONDS = 2;
 // The loops replay one noise buffer at unrelated rates, so no repeat is ever audible.
@@ -8,6 +8,8 @@ const AIR_RATE = 0.73;
 const FLUTTER_RATE = 0.017;
 const LOOKAHEAD = 0.1;
 const MASTER = 0.8;
+const DEBRIS_RATE = 80;
+const DEBRIS_DECAY = 0.5;
 
 export type FireSound = ReturnType<typeof createFireSound>;
 
@@ -74,9 +76,14 @@ export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
     glide(node.positionZ, world(cell[2], 2));
   };
 
+  let rest = { rumble: 0, roar: 0, cutoff: 500 };
   let crackleRate = 0;
   let crackleGain = 0;
   let nextCrackle = 0;
+  let strength = 0;
+  let cooling = 1;
+  let burstAt = -Infinity;
+  let burstStrength = 0;
 
   function scene(preset: Preset, tweaks: Tweaks, boxes: Box[]) {
     const h = tweaks.heat;
@@ -93,9 +100,10 @@ export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
     place(base, centre, 0, 0);
     place(plume, centre, (0.5 * tweaks.wind) / 60, 0.7);
 
-    glide(rumble.gain, 0.35 * Math.sqrt(power));
-    glide(roar.gain, 0.3 * Math.sqrt(power));
-    glide(roarFilter.frequency, 250 + 350 * Math.min(1.5, (preset.buoyancy * h) / 40));
+    rest = { rumble: 0.35 * Math.sqrt(power), roar: 0.3 * Math.sqrt(power), cutoff: 250 + 350 * Math.min(1.5, (preset.buoyancy * h) / 40) };
+    glide(rumble.gain, rest.rumble);
+    glide(roar.gain, rest.roar);
+    glide(roarFilter.frequency, rest.cutoff);
     const puffRate = 2.5 * Math.sqrt((preset.buoyancy * h) / 32) + 0.5 * tweaks.vorticity + 2 * w;
     glide(puffFilter.frequency, puffRate);
     glide(puff.gain, (0.25 + (0.5 * tweaks.vorticity) / 14) / flutterRms(puffRate));
@@ -106,6 +114,8 @@ export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
 
     crackleRate = power * (objects ? 35 : 4);
     crackleGain = objects ? 0.9 : 0.5;
+    strength = Math.min(1.3, (preset.expansion * preset.emit * h) / 5.6);
+    cooling = preset.cooling;
   }
 
   // A wood crackle: a few milliseconds of noise ringing through a random band; one in eight is a deeper pop.
@@ -123,16 +133,60 @@ export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
     const now = ctx.currentTime;
     nextCrackle = Math.max(nextCrackle, now);
     while (nextCrackle < now + LOOKAHEAD) {
-      if (crackleRate < 0.1) {
+      const age = nextCrackle - burstAt;
+      const rate = crackleRate + (age >= 0 && age < 1.8 ? DEBRIS_RATE * burstStrength * Math.exp(-age / DEBRIS_DECAY) : 0);
+      if (rate < 0.1) {
         nextCrackle = now + LOOKAHEAD;
         break;
       }
       crackle(nextCrackle);
-      nextCrackle -= Math.log(1 - Math.random()) / crackleRate;
+      nextCrackle -= Math.log(1 - Math.random()) / rate;
     }
   }
 
-  function burst() {}
+  function burst() {
+    const t = ctx.currentTime;
+    burstAt = t;
+    burstStrength = strength;
+    const crack = new AudioBufferSourceNode(ctx, { buffer: click });
+    crack.connect(gain(0.8 * strength)).connect(base);
+    crack.start(t);
+
+    // The thump skips the panners: low end carries no direction.
+    const thump = new OscillatorNode(ctx, { frequency: 110 });
+    const thumpGain = gain();
+    thump.frequency.setValueAtTime(110, t);
+    thump.frequency.exponentialRampToValueAtTime(32, t + 0.35);
+    thumpGain.gain.setValueAtTime(0, t);
+    thumpGain.gain.linearRampToValueAtTime(0.9 * strength, t + 0.01);
+    thumpGain.gain.exponentialRampToValueAtTime(0.001, t + 0.7);
+    thump.connect(thumpGain).connect(compressor);
+    thump.start(t);
+    thump.stop(t + 0.75);
+
+    const rush = new AudioBufferSourceNode(ctx, { buffer: noise, loop: true, playbackRate: 0.7 });
+    const sweep = filter('lowpass', 5000);
+    const tail = gain();
+    sweep.frequency.setValueAtTime(5000, t);
+    sweep.frequency.exponentialRampToValueAtTime(120, t + 2.5);
+    tail.gain.setValueAtTime(0, t);
+    tail.gain.linearRampToValueAtTime(0.6 * strength, t + 0.03);
+    tail.gain.exponentialRampToValueAtTime(0.001, t + 2.8);
+    rush.connect(sweep).connect(tail).connect(base);
+    rush.start(t, Math.random() * NOISE_SECONDS);
+    rush.stop(t + 2.9);
+
+    // The fireball roars while it burns, then dies away as fast as the simulation cools it.
+    const swell: [AudioParam, number, number][] = [
+      [roar.gain, 0.8 * strength, rest.roar],
+      [rumble.gain, 0.8 * strength, rest.rumble],
+      [roarFilter.frequency, 1200, rest.cutoff],
+    ];
+    for (const [param, peak, settle] of swell) {
+      glide(param, peak, 0.02);
+      param.setTargetAtTime(settle, t + BURST_LENGTH, 1 / cooling);
+    }
+  }
 
   function listen(eye: Vec3, target: Vec3) {
     const listener = ctx.listener;
