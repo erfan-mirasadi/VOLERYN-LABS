@@ -96,7 +96,7 @@ export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
     const burning = preset.mode !== 'explosion';
     const power = burning ? (preset.emit * preset.heat * h * cells) / 47600 : 0;
     const flow = burning ? (preset.emit * cells) / 36600 : 0;
-    const centre = objects ? ([0, 1, 2] as const).map((axis) => boxes.reduce((sum, b) => sum + [b.x, b.y, b.z][axis], 0) / boxes.length) : preset.emitter;
+    const centre = objects ? (['x', 'y', 'z'] as const).map((key) => boxes.reduce((sum, b) => sum + b[key], 0) / boxes.length) : preset.emitter;
     place(base, centre, 0, 0);
     place(plume, centre, (0.35 * tweaks.wind) / 60, 0.7);
 
@@ -158,7 +158,7 @@ export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
     thump.frequency.setValueAtTime(110, t);
     thump.frequency.exponentialRampToValueAtTime(32, t + 0.35);
     thumpGain.gain.setValueAtTime(0, t);
-    thumpGain.gain.linearRampToValueAtTime(0.9 * strength, t + 0.01);
+    thumpGain.gain.linearRampToValueAtTime(0.7 * strength, t + 0.01);
     thumpGain.gain.exponentialRampToValueAtTime(0.001, t + 0.7);
     thump.connect(thumpGain).connect(compressor);
     thump.start(t);
@@ -170,7 +170,7 @@ export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
     sweep.frequency.setValueAtTime(5000, t);
     sweep.frequency.exponentialRampToValueAtTime(120, t + 2.5);
     tail.gain.setValueAtTime(0, t);
-    tail.gain.linearRampToValueAtTime(0.6 * strength, t + 0.03);
+    tail.gain.linearRampToValueAtTime(0.75 * strength, t + 0.03);
     tail.gain.exponentialRampToValueAtTime(0.001, t + 2.8);
     rush.connect(sweep).connect(tail).connect(base);
     rush.start(t, Math.random() * NOISE_SECONDS);
