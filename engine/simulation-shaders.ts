@@ -276,6 +276,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(1) var sca: texture_3d<f32>;
 @group(0) @binding(2) var curl: texture_3d<f32>;
 @group(0) @binding(3) var dst: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(4) var stir: texture_3d<f32>;
+@group(0) @binding(5) var rep: sampler;
 fn spin(c: vec3<i32>) -> f32 { return textureLoad(curl, clampc(c), 0).w; }
 // The velocity each cell gains this step, taken at its centre; applyForces spreads it onto the faces.
 @compute @workgroup_size(4, 4, 4)
@@ -292,10 +294,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     v += P.dt * P.vorticity * cross(grad / len, textureLoad(curl, c, 0).xyz);
   }
   v += P.dt * P.wind * (p.y / P.size.y);
-  // Rolling noise stirs the hot gas; the pressure solve keeps only its swirling part.
-  let drift = vec3<f32>(0.0, -P.time * 1.5, 0.0);
-  let swirl = vec3<f32>(noise3(p * 0.12 + drift), noise3(p * 0.12 + drift + vec3<f32>(31.7, 0.0, 7.3)), noise3(p * 0.12 + drift + vec3<f32>(11.1, 0.0, 23.9))) - vec3<f32>(0.5);
-  v += P.dt * P.turbulence * swirl * clamp(s.y + 0.3 * s.x, 0.0, 1.5);
+  // Rising curl noise stirs the hot gas and the reaction sheet; being divergence-free it survives the projection.
+  let rise = vec3<f32>(0.0, -12.0 * P.time, 0.0);
+  let coarse = textureSampleLevel(stir, rep, (p + rise) / 32.0, 0.0).xyz;
+  let fine = textureSampleLevel(stir, rep, (p + 1.7 * rise) / 12.0 + vec3<f32>(0.37), 0.0).xyz;
+  v += P.dt * P.turbulence * (coarse + 0.4 * fine) * clamp(s.y + 0.3 * s.x + 0.05 * s.w, 0.0, 1.5);
   let d = length(p - P.emitter) / P.radius;
   if (d < 1.0) {
     v.y += P.dt * P.emit * 0.8 * (1.0 - d);

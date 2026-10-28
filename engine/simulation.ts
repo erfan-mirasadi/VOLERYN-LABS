@@ -80,7 +80,7 @@ export function createSimulation(device: GPUDevice) {
     predictVelocity: bind(pipelines.predictVelocity, [params, velocity, velocity, scratch, sampler]),
     correctVelocity: bind(pipelines.correctVelocity, [params, velocity, velocity, scratch, advected, sampler]),
     curl: bind(pipelines.curl, [params, advected, curl]),
-    forces: both((j) => bind(pipelines.forces, [params, scalars[j], curl, scratch])),
+    forces: both((j) => bind(pipelines.forces, [params, scalars[j], curl, scratch, textures.curl, textures.repeat])),
     applyForces: bind(pipelines.applyForces, [params, advected, scratch, forced, pressure.solid]),
     divergence: both((j) => bind(pipelines.divergence, [params, forced, divergence, scalars[j], pressure.solid])),
     residual: both((j) => bind(pipelines.divergence, [params, velocity, divergence, scalars[j], pressure.solid])),
