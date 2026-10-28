@@ -3,19 +3,34 @@ import { BLACKBODY, PARAMS_STRUCT, SOLIDS } from './simulation-shaders';
 
 const vec3 = (v: number[]) => `vec3<f32>(${v.map((x) => x.toFixed(3)).join(', ')})`;
 
-export const RENDER = BLACKBODY + /* wgsl */ `
+const FULLSCREEN_VS = /* wgsl */ `
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  var corners = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+  return vec4<f32>(corners[i], 0.0, 1.0);
+}`;
+
+// The ACES fit, then the sRGB transfer curve, so a frame saved as sRGB decodes to what the viewport shows.
+const TONEMAP = /* wgsl */ `
+fn tonemap(c: vec3<f32>) -> vec3<f32> {
+  let m = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0));
+  return select(1.055 * pow(m, vec3<f32>(1.0 / 2.4)) - 0.055, 12.92 * m, m <= vec3<f32>(0.0031308));
+}`;
+
+export const RENDER = BLACKBODY + TONEMAP + /* wgsl */ `
 const KEY_COLOR = ${vec3(KEY_COLOR)};
 const KEY_STRENGTH = ${KEY_STRENGTH.toFixed(3)};
 const SKY_COLOR = ${vec3(SKY_COLOR)};
 const GROUND_COLOR = ${vec3(GROUND_COLOR)};
 const NOISE_PERIOD = ${NOISE_PERIOD.toFixed(1)};
+const ALBEDO = vec3<f32>(0.03, 0.025, 0.02);
 struct View {
   camPos: vec3<f32>,
   tanHalf: f32,
   forward: vec3<f32>,
   aspect: f32,
   right: vec3<f32>,
-  time: f32,
+  frameTime: f32,
   up: vec3<f32>,
   stepSize: f32,
   boxMin: vec3<f32>,
@@ -25,14 +40,14 @@ struct View {
   smokeTint: vec3<f32>,
   fire: f32,
   viewport: vec4<f32>,
-  layer: f32,
+  maxSteps: f32,
   fireLight: f32,
   frame: f32,
   fireDensity: f32,
   detail: f32,
   flowWeight: f32,
-  pad3: f32,
-  pad4: f32,
+  sampleWeight: f32,
+  pad: f32,
 }
 @group(0) @binding(0) var<uniform> V: View;
 @group(0) @binding(1) var sca: texture_3d<f32>;
@@ -45,22 +60,8 @@ struct View {
 @group(0) @binding(7) var rep: sampler;
 @group(0) @binding(8) var flowA: texture_3d<f32>;
 @group(0) @binding(9) var flowB: texture_3d<f32>;
-` + SOLIDS + /* wgsl */ `
-@vertex
-fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
-  var corners = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
-  return vec4<f32>(corners[i], 0.0, 1.0);
-}
-
-fn tonemap(c: vec3<f32>) -> vec3<f32> {
-  let m = (c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14);
-  return pow(clamp(m, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
-}
-
-fn heatRamp(t: f32) -> vec3<f32> {
-  let x = clamp(t / 3.0, 0.0, 1.0) * 3.0;
-  return clamp(vec3<f32>(x, x - 1.0, x - 2.0), vec3<f32>(0.0), vec3<f32>(1.0));
-}
+@group(0) @binding(10) var vel: texture_3d<f32>;
+` + SOLIDS + FULLSCREEN_VS + /* wgsl */ `
 
 // Interleaved gradient noise, slid across the screen each frame so the TAA averages the step offsets into grain
 // rather than a standing dither screen.
@@ -73,30 +74,41 @@ fn jitter(p: vec2<f32>, frame: f32) -> f32 {
 fn hg(mu: f32, g: f32) -> f32 { return (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * mu, 1.5); }
 fn dualLobe(mu: f32, k: f32) -> f32 { return 0.8 * hg(mu, 0.45 * k) + 0.2 * hg(mu, -0.25 * k); }
 
-@fragment
-fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
-  let local = (frag.xy - V.viewport.xy) / V.viewport.zw;
+// The light groups add up to the beauty: fire is everything that glows, firelight the flame's light on smoke and
+// solids, smoke the key light and sky on them. depth is the visibility-weighted distance along the ray.
+struct March {
+  fire: vec3<f32>,
+  firelight: vec3<f32>,
+  smoke: vec3<f32>,
+  alpha: f32,
+  depth: f32,
+  seen: f32,
+  heat: f32,
+  dir: vec3<f32>,
+}
+
+fn march(frag: vec2<f32>) -> March {
+  var m: March;
+  let local = (frag - V.viewport.xy) / V.viewport.zw;
   let ndc = vec2<f32>(local.x * 2.0 - 1.0, 1.0 - local.y * 2.0);
   let dir = normalize(V.forward + ndc.x * V.aspect * V.tanHalf * V.right + ndc.y * V.tanHalf * V.up);
+  m.dir = dir;
   let inv = 1.0 / dir;
   let t0 = (V.boxMin - V.camPos) * inv;
   let t1 = (V.boxMax - V.camPos) * inv;
   let tNear = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), min(t0.z, t1.z));
   let tFar = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
-  if (tFar <= max(tNear, 0.0)) { return select(vec4<f32>(0.0), vec4<f32>(0.0, 0.0, 0.0, 1.0), V.layer > 0.5); }
+  if (tFar <= max(tNear, 0.0)) { return m; }
   let size = V.boxMax - V.boxMin;
-  var t = max(tNear, 0.0) + V.stepSize * jitter(frag.xy, V.frame);
+  var t = max(tNear, 0.0) + V.stepSize * jitter(frag, V.frame);
   var transmittance = 1.0;
-  var fire = vec3<f32>(0.0);
-  var smoke = vec3<f32>(0.0);
-  var solid = vec3<f32>(0.0);
   var depthSum = 0.0;
   var weightSum = 0.0;
   var hottest = 0.0;
   // lightDir points at the light, so mu = 1 looks straight into it: backlit smoke gets the bright forward lobe.
   let mu = dot(dir, P.lightDir);
   let phase = vec3<f32>(dualLobe(mu, 1.0), dualLobe(mu, 0.5), dualLobe(mu, 0.25));
-  for (var i = 0; i < 160; i++) {
+  for (var i = 0; i < i32(V.maxSteps); i++) {
     if (t > tFar || transmittance < 0.01) { break; }
     let q = (V.camPos + dir * t - V.boxMin) / size;
     let g = q * P.size - vec3<f32>(0.5);
@@ -123,7 +135,9 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         let surface = textureSampleLevel(sca, lin, qh + n * 2.0 / P.size, 0.0);
         let flameLight = textureSampleLevel(glow, lin, qh, 0.0).rgb * V.fireLight * V.fire;
         let ember = blackbody(surface.y) * smoothstep(1.0, 6.0, surface.w) * 0.25 * V.fire;
-        solid += transmittance * (vec3<f32>(0.03, 0.025, 0.02) * (lit + flameLight) + ember);
+        m.smoke += transmittance * ALBEDO * lit;
+        m.firelight += transmittance * ALBEDO * flameLight;
+        m.fire += transmittance * ember;
         depthSum += transmittance * hit;
         weightSum += transmittance;
         hottest = max(hottest, surface.y);
@@ -131,11 +145,11 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         break;
       }
     }
-    // Blocks holding gas thinner than 0.02 count as empty and are crossed three steps (4.5 cells) at a time, inside
-    // the occupancy's dilated 8-cell margin and short of any solid the SDF reports.
+    // Blocks holding gas thinner than 0.02 count as empty and are crossed 4.5 cells at a time, inside the
+    // occupancy's dilated 8-cell margin and short of any solid the SDF reports.
     let blocks = vec3<i32>(textureDimensions(glow));
     if (textureLoad(glow, min(vec3<i32>(q * vec3<f32>(blocks)), blocks - 1), 0).a < 0.02 && sd > 4.5) {
-      t += 3.0 * V.stepSize;
+      t += 4.5 / P.size.x;
       continue;
     }
     let lightHere = textureSampleLevel(glow, lin, q, 0.0);
@@ -159,29 +173,83 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let sigma = sigmaSmoke + sigmaFire;
     let opacity = 1.0 - exp(-sigma * V.stepSize);
     let reach = transmittance * opacity / max(sigma, 1e-4);
-    fire += reach * sigmaFire * blackbody(s.y) * V.fire;
+    m.fire += reach * sigmaFire * blackbody(s.y) * V.fire;
     // Wrenninge octaves: each softer and weaker, standing in for light scattered more than once; the weights sum to
     // one so an unshadowed cell gets exactly the key.
     let key = (4.0 * phase.x * light.x + 2.0 * phase.y * sqrt(light.x) + phase.z * sqrt(sqrt(light.x))) / 7.0;
     let ambient = mix(GROUND_COLOR, SKY_COLOR, light.y);
-    smoke += reach * sigmaSmoke * V.smokeTint * (KEY_STRENGTH * KEY_COLOR * key + ambient + flameLight);
+    let scattered = reach * sigmaSmoke * V.smokeTint;
+    m.smoke += scattered * (KEY_STRENGTH * KEY_COLOR * key + ambient);
+    m.firelight += scattered * flameLight;
     depthSum += transmittance * opacity * t;
     weightSum += transmittance * opacity;
     hottest = max(hottest, s.y);
     transmittance *= 1.0 - opacity;
     t += V.stepSize;
   }
-  let alpha = 1.0 - transmittance;
-  // Layers for compositing: 1 fire light, 2 smoke and solids, 3 alpha, 4 depth (near is white), 5 temperature.
-  if (V.layer == 1.0) { return vec4<f32>(tonemap(fire * V.exposure), 1.0); }
-  if (V.layer == 2.0) { return vec4<f32>(tonemap((smoke + solid) * V.exposure), 1.0); }
-  if (V.layer == 3.0) { return vec4<f32>(vec3<f32>(alpha), 1.0); }
-  if (V.layer == 4.0) {
-    let near = select(0.0, 1.0 - clamp(depthSum / max(weightSum, 1e-4) - 5.7, 0.0, 1.0), weightSum > 0.02);
-    return vec4<f32>(vec3<f32>(near), 1.0);
+  m.fire *= V.exposure;
+  m.firelight *= V.exposure;
+  m.smoke *= V.exposure;
+  m.alpha = 1.0 - transmittance;
+  m.depth = depthSum / max(weightSum, 1e-6);
+  m.seen = weightSum;
+  m.heat = hottest;
+  return m;
+}
+
+@fragment
+fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let m = march(frag.xy);
+  return vec4<f32>(tonemap(m.fire + m.firelight + m.smoke), m.alpha);
+}
+
+fn toPixel(p: vec3<f32>) -> vec2<f32> {
+  let r = p - V.camPos;
+  let z = dot(r, V.forward);
+  return vec2<f32>(0.5 + 0.5 * dot(r, V.right) / (z * V.tanHalf * V.aspect), 0.5 - 0.5 * dot(r, V.up) / (z * V.tanHalf)) * V.viewport.zw;
+}
+
+// The light groups as linear premultiplied colour, plus temperature in firelight.a and a data target holding the
+// forward motion in pixels per frame (+y down), the planar camera depth and the coverage, the first three weighted
+// by the coverage so samples that miss leave them untouched. Every target is scaled by the sample weight and
+// summed by additive blending, so N samples give an exact mean.
+struct ExportOut {
+  @location(0) fire: vec4<f32>,
+  @location(1) firelight: vec4<f32>,
+  @location(2) smoke: vec4<f32>,
+  @location(3) data: vec4<f32>,
+}
+
+@fragment
+fn fsExport(@builtin(position) frag: vec4<f32>) -> ExportOut {
+  let m = march(frag.xy);
+  var data = vec4<f32>(0.0);
+  if (m.seen > 0.02) {
+    let p = V.camPos + m.dir * m.depth;
+    let q = (p - V.boxMin) / (V.boxMax - V.boxMin);
+    // The solver keeps velocity on the lower faces in cells per second; one cell is 1 / P.size.x world units.
+    let h = 0.5 / P.size;
+    let v = vec3<f32>(
+      textureSampleLevel(vel, lin, q + vec3<f32>(h.x, 0.0, 0.0), 0.0).x,
+      textureSampleLevel(vel, lin, q + vec3<f32>(0.0, h.y, 0.0), 0.0).y,
+      textureSampleLevel(vel, lin, q + vec3<f32>(0.0, 0.0, h.z), 0.0).z) / P.size.x;
+    data = vec4<f32>(toPixel(p + v * V.frameTime) - toPixel(p), m.depth * dot(m.dir, V.forward), 1.0);
   }
-  if (V.layer == 5.0) { return vec4<f32>(heatRamp(hottest), 1.0); }
-  return vec4<f32>(tonemap((fire + smoke + solid) * V.exposure), alpha);
+  let w = V.sampleWeight;
+  return ExportOut(vec4<f32>(m.fire, m.alpha) * w, vec4<f32>(m.firelight, m.heat) * w, vec4<f32>(m.smoke, 0.0) * w, data * w);
+}`;
+
+// The accumulated light groups through the same tonemap as the live view: what a PNG or MP4 frame holds.
+export const DISPLAY = TONEMAP + /* wgsl */ `
+@group(0) @binding(0) var fire: texture_2d<f32>;
+@group(0) @binding(1) var firelight: texture_2d<f32>;
+@group(0) @binding(2) var smoke: texture_2d<f32>;
+` + FULLSCREEN_VS + /* wgsl */ `
+@fragment
+fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let p = vec2<i32>(frag.xy);
+  let f = textureLoad(fire, p, 0);
+  return vec4<f32>(tonemap(f.rgb + textureLoad(firelight, p, 0).rgb + textureLoad(smoke, p, 0).rgb), f.a);
 }`;
 
 // Temporal blend of the jittered raymarch with the last frame, the history clamped to the current neighbourhood so it cannot ghost.
@@ -190,11 +258,7 @@ struct Taa { blend: f32 }
 @group(0) @binding(0) var<uniform> T: Taa;
 @group(0) @binding(1) var current: texture_2d<f32>;
 @group(0) @binding(2) var history: texture_2d<f32>;
-@vertex
-fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
-  var corners = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
-  return vec4<f32>(corners[i], 0.0, 1.0);
-}
+` + FULLSCREEN_VS + /* wgsl */ `
 @fragment
 fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let p = vec2<i32>(frag.xy);

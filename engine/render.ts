@@ -4,8 +4,10 @@ import type { Volumes } from './simulation';
 
 const VIEW_FLOATS = 40;
 const TARGET_FORMAT: GPUTextureFormat = 'rgba16float';
-const BOX_MIN = [-0.5, 0, (-0.5 * GRID[2]) / GRID[0]];
-const BOX_MAX = [0.5, GRID[1] / GRID[0], (0.5 * GRID[2]) / GRID[0]];
+const LIVE_STEP_CELLS = 1.5;
+const LIVE_MAX_STEPS = 160;
+export const BOX_MIN: Vec3 = [-0.5, 0, (-0.5 * GRID[2]) / GRID[0]];
+export const BOX_MAX: Vec3 = [0.5, GRID[1] / GRID[0], (0.5 * GRID[2]) / GRID[0]];
 
 export type Vec3 = [number, number, number];
 
@@ -26,19 +28,35 @@ export type Frame = {
   timestamps: Record<'render' | 'taa' | 'composite', GPURenderPassTimestampWrites | undefined>;
 };
 
+type ViewParams = {
+  camera: Camera;
+  preset: Preset;
+  time: number;
+  width: number;
+  height: number;
+  // Sub-pixel offset of the sample in pixels, and the frame counter that moves the ray-start dither.
+  jitter: [number, number];
+  frame: number;
+  stepCells: number;
+  maxSteps: number;
+  sampleWeight: number;
+  // Seconds between exported frames, which turns velocity into motion; 0 live.
+  frameTime: number;
+};
+
 export type Renderer = ReturnType<typeof createRenderer>;
 
 export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volumes: Volumes) {
-  const fullscreen = (code: string, target: GPUTextureFormat) => {
-    const shader = device.createShaderModule({ code });
-    return device.createRenderPipeline({
+  const pipeline = (module: GPUShaderModule, entryPoint: string, targets: GPUColorTargetState[]) =>
+    device.createRenderPipeline({
       layout: 'auto',
-      vertex: { module: shader, entryPoint: 'vs' },
-      fragment: { module: shader, entryPoint: 'fs', targets: [{ format: target }] },
+      vertex: { module, entryPoint: 'vs' },
+      fragment: { module, entryPoint, targets },
       primitive: { topology: 'triangle-list' },
     });
-  };
-  const raymarch = fullscreen(RENDER, TARGET_FORMAT);
+  const fullscreen = (code: string, target: GPUTextureFormat) => pipeline(device.createShaderModule({ code }), 'fs', [{ format: target }]);
+  const renderModule = device.createShaderModule({ code: RENDER });
+  const raymarch = pipeline(renderModule, 'fs', [{ format: TARGET_FORMAT }]);
   const resolve = fullscreen(RESOLVE, TARGET_FORMAT);
   const composite = fullscreen(COMPOSITE, format);
 
@@ -111,23 +129,21 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   }
 
   const viewData = new Float32Array(VIEW_FLOATS);
-  function writeView({ camera, preset, time, index, width, height }: Frame) {
-    const forward = unit(sub(camera.target, camera.eye));
-    const right = unit(cross(forward, [0, 1, 0]));
-    const up = cross(right, forward);
+  function writeView({ camera, preset, time, width, height, jitter, frame, stepCells, maxSteps, sampleWeight, frameTime }: ViewParams) {
+    const { forward, right, up } = cameraBasis(camera);
     // Flow A's weight is 0 the moment it resets and 1 when B does; B gets the rest.
     const flowWeight = 1 - Math.abs(1 - 2 * ((time / FLOW_PERIOD) % 1));
     viewData.set([
       ...camera.eye, camera.tanHalfFov,
       ...forward, width / height,
-      ...right, time,
-      ...up, 1.5 / GRID[0],
+      ...right, frameTime,
+      ...up, stepCells / GRID[0],
       ...BOX_MIN, EXPOSURE,
       ...BOX_MAX, DENSITY,
       ...preset.tint, preset.glow,
-      0, 0, width, height,
-      0, FIRE_LIGHT, index, preset.fireDensity,
-      preset.detail, flowWeight, 0, 0,
+      -jitter[0], -jitter[1], width, height,
+      maxSteps, FIRE_LIGHT, frame, preset.fireDensity,
+      preset.detail, flowWeight, sampleWeight, 0,
     ]);
     device.queue.writeBuffer(viewBuffer, 0, viewData);
   }
@@ -145,7 +161,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
 
   function draw(encoder: GPUCommandEncoder, canvasView: GPUTextureView, frame: Frame) {
     const { current, history, resolveGroups, compositeGroups } = ensureTargets(frame.width, frame.height);
-    writeView(frame);
+    writeView({ ...frame, jitter: [0, 0], frame: frame.index, stepCells: LIVE_STEP_CELLS, maxSteps: LIVE_MAX_STEPS, sampleWeight: 1, frameTime: 0 });
     device.queue.writeBuffer(blendBuffer, 0, new Float32Array([historyValid ? frame.blend : 1]));
     const next = 1 - historyIndex;
     fullscreenPass(encoder, current.createView(), raymarch, raymarchGroups[frame.scalarIndex], frame.timestamps.render);
@@ -166,6 +182,12 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
       blendBuffer.destroy();
     },
   };
+}
+
+export function cameraBasis({ eye, target }: Camera) {
+  const forward = unit(sub(target, eye));
+  const right = unit(cross(forward, [0, 1, 0]));
+  return { forward, right, up: cross(right, forward) };
 }
 
 const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
