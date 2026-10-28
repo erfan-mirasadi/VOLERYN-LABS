@@ -97,7 +97,11 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
       dt: 1 / (job.fps * substepsFor(job.fps)),
       samples: job.samples,
       stepCells: EXPORT_STEP_CELLS,
-      loop: { overlap, method: 'field-space crossfade' },
+      loop: {
+        overlap,
+        method: 'field-space crossfade',
+        ...(overlap > 0 && { note: 'during the crossfade the flame detail phase and the motion vectors follow the live state, not the blend' }),
+      },
     },
     output: outputNotes(settings, exr),
     ...(flipbook && {
