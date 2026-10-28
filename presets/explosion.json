@@ -20,5 +20,6 @@
   "fireDensity": 30,
   "ignite": 0.35,
   "burst": 0.05,
-  "blast": 120
+  "blast": 120,
+  "detail": 2
 }

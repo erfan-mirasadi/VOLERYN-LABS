@@ -1,4 +1,4 @@
-import { GROUND_COLOR, KEY_COLOR, KEY_STRENGTH, SKY_COLOR } from './scene';
+import { GROUND_COLOR, KEY_COLOR, KEY_STRENGTH, NOISE_PERIOD, SKY_COLOR } from './scene';
 import { BLACKBODY, PARAMS_STRUCT, SOLIDS } from './simulation-shaders';
 
 const vec3 = (v: number[]) => `vec3<f32>(${v.map((x) => x.toFixed(3)).join(', ')})`;
@@ -8,6 +8,7 @@ const KEY_COLOR = ${vec3(KEY_COLOR)};
 const KEY_STRENGTH = ${KEY_STRENGTH.toFixed(3)};
 const SKY_COLOR = ${vec3(SKY_COLOR)};
 const GROUND_COLOR = ${vec3(GROUND_COLOR)};
+const NOISE_PERIOD = ${NOISE_PERIOD.toFixed(1)};
 struct View {
   camPos: vec3<f32>,
   tanHalf: f32,
@@ -28,6 +29,10 @@ struct View {
   fireLight: f32,
   frame: f32,
   fireDensity: f32,
+  detail: f32,
+  flowWeight: f32,
+  pad3: f32,
+  pad4: f32,
 }
 @group(0) @binding(0) var<uniform> V: View;
 @group(0) @binding(1) var sca: texture_3d<f32>;
@@ -36,6 +41,10 @@ struct View {
 ` + PARAMS_STRUCT + /* wgsl */ `
 @group(0) @binding(4) var<uniform> P: Params;
 @group(0) @binding(5) var glow: texture_3d<f32>;
+@group(0) @binding(6) var noise: texture_3d<f32>;
+@group(0) @binding(7) var rep: sampler;
+@group(0) @binding(8) var flowA: texture_3d<f32>;
+@group(0) @binding(9) var flowB: texture_3d<f32>;
 ` + SOLIDS + /* wgsl */ `
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -126,11 +135,23 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
       t += 3.0 * V.stepSize;
       continue;
     }
-    let s = textureSampleLevel(sca, lin, q, 0.0);
+    var s = textureSampleLevel(sca, lin, q, 0.0);
+    var breakup = 1.0;
+    if (V.detail > 0.0 && s.y > 0.2) {
+      // Sub-cell tongues: noise looked up where the gas came from, so it travels with the flow. The two fields are
+      // blended by value, never by coordinate: a coordinate blend alternates between a frozen pattern and one moving
+      // at twice the gas speed.
+      let nA = textureSampleLevel(noise, rep, (g + textureSampleLevel(flowA, lin, q, 0.0).xyz) / NOISE_PERIOD, 0.0);
+      let nB = textureSampleLevel(noise, rep, (g + textureSampleLevel(flowB, lin, q, 0.0).xyz) / NOISE_PERIOD, 0.0);
+      let n = mix(nB, nA, V.flowWeight) - vec4<f32>(0.5);
+      let gate = clamp(s.y, 0.0, 1.0);
+      s = textureSampleLevel(sca, lin, q + n.xyz * 2.0 * V.detail * gate / P.size, 0.0);
+      breakup = 1.0 + 1.2 * n.w * gate;
+    }
     let light = textureSampleLevel(shade, lin, q, 0.0);
     let flameLight = lightHere.rgb * V.fireLight * V.fire;
     let sigmaSmoke = s.x * V.density;
-    let sigmaFire = V.fireDensity * flame(s.y);
+    let sigmaFire = V.fireDensity * flame(s.y) * breakup;
     let sigma = sigmaSmoke + sigmaFire;
     let opacity = 1.0 - exp(-sigma * V.stepSize);
     let reach = transmittance * opacity / max(sigma, 1e-4);

@@ -1,8 +1,8 @@
 import { COMPOSITE, RENDER, RESOLVE } from './render-shaders';
-import { DENSITY, EXPOSURE, FIRE_LIGHT, GRID, type Preset } from './scene';
+import { DENSITY, EXPOSURE, FIRE_LIGHT, FLOW_PERIOD, GRID, type Preset } from './scene';
 import type { Volumes } from './simulation';
 
-const VIEW_FLOATS = 36;
+const VIEW_FLOATS = 40;
 const TARGET_FORMAT: GPUTextureFormat = 'rgba16float';
 const BOX_MIN = [-0.5, 0, (-0.5 * GRID[2]) / GRID[0]];
 const BOX_MAX = [0.5, GRID[1] / GRID[0], (0.5 * GRID[2]) / GRID[0]];
@@ -44,7 +44,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
 
   const viewBuffer = device.createBuffer({ size: VIEW_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const blendBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const raymarchGroups = volumes.scalars.map((scalars) =>
+  const raymarchGroups = volumes.scalars.map((scalars, j) =>
     device.createBindGroup({
       layout: raymarch.getBindGroupLayout(0),
       entries: [
@@ -54,6 +54,10 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
         { binding: 3, resource: volumes.sampler },
         { binding: 4, resource: { buffer: volumes.params } },
         { binding: 5, resource: volumes.light.createView() },
+        { binding: 6, resource: volumes.textures.noise.createView() },
+        { binding: 7, resource: volumes.textures.repeat },
+        { binding: 8, resource: volumes.flows[j][0].createView() },
+        { binding: 9, resource: volumes.flows[j][1].createView() },
       ],
     }),
   );
@@ -111,6 +115,8 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     const forward = unit(sub(camera.target, camera.eye));
     const right = unit(cross(forward, [0, 1, 0]));
     const up = cross(right, forward);
+    // Flow A's weight is 0 the moment it resets and 1 when B does; B gets the rest.
+    const flowWeight = 1 - Math.abs(1 - 2 * ((time / FLOW_PERIOD) % 1));
     viewData.set([
       ...camera.eye, camera.tanHalfFov,
       ...forward, width / height,
@@ -121,6 +127,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
       ...preset.tint, preset.glow,
       0, 0, width, height,
       0, FIRE_LIGHT, index, preset.fireDensity,
+      preset.detail, flowWeight, 0, 0,
     ]);
     device.queue.writeBuffer(viewBuffer, 0, viewData);
   }

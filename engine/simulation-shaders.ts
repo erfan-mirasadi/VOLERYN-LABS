@@ -227,6 +227,29 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   q *= 1.0 - 0.15 * smoothstep(0.8, 1.0, p.y / P.size.y);
   textureStore(dst, c, max(q, vec4<f32>(0.0)));
 }`,
+  advectFlow: /* wgsl */ `
+@group(0) @binding(1) var vel: texture_3d<f32>;
+@group(0) @binding(2) var srcA: texture_3d<f32>;
+@group(0) @binding(3) var srcB: texture_3d<f32>;
+@group(0) @binding(4) var dstA: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(5) var dstB: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(6) var lin: sampler;
+${TRACE}
+// Two displacement fields ride the flow and take turns resetting to zero, so the detail noise the render looks up
+// through them travels with the gas and never stretches for more than a period.
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let c = vec3<i32>(id);
+  if (!inside(c)) { return; }
+  let p = vec3<f32>(c);
+  let back = trace(p, P.dt);
+  let shift = back - p;
+  let a = textureSampleLevel(srcA, lin, coord(back), 0.0).xyz + shift;
+  let b = textureSampleLevel(srcB, lin, coord(back), 0.0).xyz + shift;
+  let reset = u32(P.flowReset);
+  textureStore(dstA, c, vec4<f32>(select(a, vec3<f32>(0.0), (reset & 1u) != 0u), 0.0));
+  textureStore(dstB, c, vec4<f32>(select(b, vec3<f32>(0.0), (reset & 2u) != 0u), 0.0));
+}`,
   curl: /* wgsl */ `
 @group(0) @binding(1) var vel: texture_3d<f32>;
 @group(0) @binding(2) var dst: texture_storage_3d<rgba16float, write>;

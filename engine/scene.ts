@@ -17,6 +17,9 @@ export const GROUND_COLOR = [0.08, 0.07, 0.06];
 export const MAX_BOXES = 4;
 // How fast an explosion's blast fades after the charge goes off, in seconds.
 export const BLAST_DECAY = 0.08;
+// The flame's sub-cell detail: cells per noise tile, and how often each of the two flow fields that carry it resets.
+export const NOISE_PERIOD = 8;
+export const FLOW_PERIOD = 1.5;
 
 // An axis-aligned box in grid cells, turned about y; its skin gives off fuel and its body blocks the flow.
 export type Box = { x: number; y: number; z: number; yaw: number; hx: number; hy: number; hz: number };
@@ -46,6 +49,8 @@ export type Preset = {
   glow: number;
   // Extinction of the glowing soot per box width; with glow it gives the flame a body that hides what is behind it.
   fireDensity: number;
+  // How far, in cells, the flame's sub-cell noise displaces the lookup; 0 turns it off.
+  detail: number;
   // Explosions only: how long the charge feeds, in seconds, and the peak divergence per cell at its centre, in cells/s.
   burst?: number;
   blast?: number;

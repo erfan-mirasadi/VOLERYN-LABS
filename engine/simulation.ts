@@ -1,8 +1,10 @@
 import { bindResources } from './gpu';
+import { createNoiseTextures, type NoiseTextures } from './noise-textures';
 import { createPressureSolver } from './pressure';
 import {
   type Box,
   DT,
+  FLOW_PERIOD,
   GRID,
   LIGHT,
   LIGHT_BLUR_PASSES,
@@ -23,10 +25,13 @@ const ROW_BYTES = Math.ceil((GRID[0] * 4) / 256) * 256;
 
 export type Volumes = {
   scalars: [GPUTexture, GPUTexture];
+  // Per scalar index, the two displacement fields the flame detail rides on.
+  flows: [GPUTexture, GPUTexture][];
   shadow: GPUTexture;
   light: GPUTexture;
   params: GPUBuffer;
   sampler: GPUSampler;
+  textures: NoiseTextures;
 };
 
 export type Simulation = ReturnType<typeof createSimulation>;
@@ -41,6 +46,7 @@ export function createSimulation(device: GPUDevice) {
   // A spare volume: the MacCormack prediction, then the cell-centred forces.
   const scratch = volume('rgba16float');
   const scalars: [GPUTexture, GPUTexture] = [volume('rgba16float'), volume('rgba16float')];
+  const flows: [GPUTexture, GPUTexture][] = [0, 1].map(() => [volume('rgba16float'), volume('rgba16float')]);
   const curl = volume('rgba16float');
   const divergence = volume('r32float', GRID, GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC);
   const shadow = volume('rgba16float', SHADOW_GRID);
@@ -55,6 +61,7 @@ export function createSimulation(device: GPUDevice) {
   const params = device.createBuffer({ size: PARAM_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const staging = device.createBuffer({ size: ROW_BYTES * GRID[1] * GRID[2], usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   const pressure = createPressureSolver(device, params, divergence);
+  const textures = createNoiseTextures(device);
 
   const compute = (code: string, constants?: Record<string, number>) =>
     device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code }), entryPoint: 'main', constants } });
@@ -80,11 +87,12 @@ export function createSimulation(device: GPUDevice) {
     project: bind(pipelines.project, [params, forced, pressure.texture, velocity, pressure.solid]),
     predict: both((j) => bind(pipelines.predict, [params, velocity, scalars[j], scratch, sampler])),
     correct: both((j) => bind(pipelines.correct, [params, velocity, scalars[j], scratch, scalars[1 - j], sampler])),
+    advectFlow: both((j) => bind(pipelines.advectFlow, [params, velocity, ...flows[j], ...flows[1 - j], sampler])),
     shadow: both((j) => bind(pipelines.shadow, [params, scalars[j], sampler, shadow])),
     emission: both((j) => bind(emission, [scalars[j], light[0]])),
     lightBlur: lightBlur.map((pipeline) => both((k) => bind(pipeline, [light[k], light[1 - k]]))),
     clear: [
-      ...[velocity, ...scalars].map((t) => [clearHalf, bind(clearHalf, [t])] as const),
+      ...[velocity, ...scalars, ...flows.flat()].map((t) => [clearHalf, bind(clearHalf, [t])] as const),
       [clearFloat, bind(clearFloat, [pressure.texture])] as const,
     ],
   };
@@ -101,12 +109,20 @@ export function createSimulation(device: GPUDevice) {
   // Which scalar texture holds the latest state; the pair ping-pongs every step.
   let sc = 0;
   const paramData = new Float32Array(PARAM_FLOATS);
+  // The flow fields reset half a period apart; a change of phase since the last step flags the reset.
+  let phaseA = 0;
+  let phaseB = 0;
 
   function writeParams(preset: Preset, tweaks: Tweaks, boxes: Box[], time: number, emitting: boolean, blast: number) {
     const boxData = Array.from({ length: MAX_BOXES }, (_, i) => {
       const box = boxes[i];
       return box ? [box.x, box.y, box.z, box.yaw, box.hx, box.hy, box.hz, 1] : [0, 0, 0, 0, 0, 0, 0, 0];
     }).flat();
+    const nextA = Math.floor(time / FLOW_PERIOD);
+    const nextB = Math.floor(time / FLOW_PERIOD + 0.5);
+    const flowReset = (nextA !== phaseA ? 1 : 0) + (nextB !== phaseB ? 2 : 0);
+    phaseA = nextA;
+    phaseB = nextB;
     paramData.set([
       ...GRID, DT,
       time, preset.buoyancy * tweaks.heat, preset.cooling, tweaks.vorticity,
@@ -115,7 +131,7 @@ export function createSimulation(device: GPUDevice) {
       emitting ? preset.emit : 0, preset.smokeYield, preset.heat * tweaks.heat, preset.dissipation,
       ...LIGHT, MODE_INDEX[preset.mode],
       preset.turbulence, preset.damping, preset.expansion, blast,
-      preset.ignite, 0, 0, 0,
+      preset.ignite, flowReset, 0, 0,
       ...boxData,
     ]);
     device.queue.writeBuffer(params, 0, paramData);
@@ -134,6 +150,7 @@ export function createSimulation(device: GPUDevice) {
     run(pass, pipelines.project, groups.project);
     run(pass, pipelines.predict, groups.predict[sc]);
     run(pass, pipelines.correct, groups.correct[sc]);
+    run(pass, pipelines.advectFlow, groups.advectFlow[sc]);
     sc = 1 - sc;
   }
 
@@ -184,12 +201,14 @@ export function createSimulation(device: GPUDevice) {
   }
 
   function dispose() {
-    for (const texture of [velocity, advected, forced, scratch, ...scalars, curl, divergence, shadow, ...light]) texture.destroy();
+    for (const texture of [velocity, advected, forced, scratch, ...scalars, ...flows.flat(), curl, divergence, shadow, ...light]) texture.destroy();
+    textures.noise.destroy();
+    textures.curl.destroy();
     pressure.dispose();
     params.destroy();
     staging.destroy();
   }
 
-  const volumes: Volumes = { scalars, shadow, light: light[0], params, sampler };
+  const volumes: Volumes = { scalars, flows, shadow, light: light[0], params, sampler, textures };
   return { volumes, writeParams, step, updateLighting, readResidual, clear, dispose, get scalarIndex() { return sc; } };
 }
