@@ -1,5 +1,6 @@
 import { requestGpu } from './gpu';
 import { GpuTimer } from './gpu-timer';
+import { type OfflineJob, type RenderedFrame, renderOffline } from './offline-render';
 import { createRenderer, type Vec3 } from './render';
 import { BLAST_DECAY, type Box, DT, GRID, MAX_BOXES, type Preset, type Tweaks } from './scene';
 import { createSimulation } from './simulation';
@@ -34,6 +35,7 @@ export type EngineStats = {
 };
 
 export type Engine = Awaited<ReturnType<typeof createEngine>>;
+export type Snapshot = ReturnType<Engine['snapshot']>;
 
 export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Preset) {
   const { device, format, adapterName, hasTimestamps } = await requestGpu();
@@ -55,6 +57,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   let running = true;
   let visible = true;
   let looping = false;
+  let exporting = false;
 
   const target: Vec3 = [0, 0.72, 0];
   let azimuth = 0.5;
@@ -109,7 +112,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   }
 
   function tick(now: number) {
-    if (!running || !visible) {
+    if (!running || !visible || exporting) {
       looping = false;
       return;
     }
@@ -165,7 +168,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   }
 
   function startLoop() {
-    if (looping || !running) return;
+    if (looping || !running || exporting) return;
     looping = true;
     lastFrame = fpsSince = performance.now();
     fpsFrames = 0;
@@ -237,6 +240,42 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     },
     addBox(box: Box) {
       boxes = [...boxes, box].slice(-MAX_BOXES);
+    },
+    // Everything an export needs to be re-rendered later.
+    snapshot() {
+      return {
+        preset,
+        tweaks: { ...tweaks },
+        boxes: boxes.map((box) => ({ ...box })),
+        camera: { eye: eye(), target: [...target] as Vec3, tanHalfFov: Math.tan(FOV / 2) },
+        orbit: { azimuth, polar, distance: ORBIT_DISTANCE, fovDegrees: 35 },
+      };
+    },
+    // Pauses the live loop, restarts the simulation from nothing and renders the job frame by frame.
+    async render(job: OfflineJob, onFrame: (frame: RenderedFrame) => Promise<void>, signal: AbortSignal) {
+      if (exporting) throw new Error('An export is already running.');
+      exporting = true;
+      cancelAnimationFrame(frame);
+      looping = false;
+      fps = stepsPerSecond = 0;
+      simulation.clear();
+      simTime = burstStart = 0;
+      const step = (dt: number) => {
+        const encoder = device.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        advance(pass, dt);
+        pass.end();
+        device.queue.submit([encoder.finish()]);
+        return simTime;
+      };
+      try {
+        await renderOffline({ device, context, canvas, simulation, renderer, preset, step }, job, onFrame, signal);
+      } finally {
+        exporting = false;
+        stepsSince = stepCount;
+        renderer.resetHistory();
+        startLoop();
+      }
     },
     stats(): EngineStats {
       const times = timer.averages();
