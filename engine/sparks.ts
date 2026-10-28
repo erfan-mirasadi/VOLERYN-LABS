@@ -43,9 +43,17 @@ export function createSparkSimulation(device: GPUDevice, { paramSlots, velocity,
   };
 }
 
-// The streak pass: additive onto the live raymarch target, or into the export's fire layer alone.
+// The streak pass: additive onto the live frame after its temporal resolve, or into the export's fire layer alone.
 export function createSparkRenderer(device: GPUDevice, view: GPUBuffer, volumes: Volumes, format: GPUTextureFormat) {
   const shader = device.createShaderModule({ code: SPARK_DRAW });
+  // How much of the sparks a draw shows; a looping export fades them across its seam.
+  const fade = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  let shown = 0;
+  const show = (weight: number) => {
+    if (weight === shown) return;
+    shown = weight;
+    device.queue.writeBuffer(fade, 0, new Float32Array([weight]));
+  };
   // A pipeline and its bind groups, one per scalar volume.
   const make = (entryPoint: string, targets: GPUColorTargetState[]) => {
     const pipeline = device.createRenderPipeline({
@@ -63,6 +71,7 @@ export function createSparkRenderer(device: GPUDevice, view: GPUBuffer, volumes:
           { binding: 2, resource: scalars.createView() },
           { binding: 3, resource: volumes.sampler },
           { binding: 4, resource: { buffer: volumes.sparks } },
+          { binding: 5, resource: { buffer: fade } },
         ],
       }),
     );
@@ -79,11 +88,18 @@ export function createSparkRenderer(device: GPUDevice, view: GPUBuffer, volumes:
   };
 
   return {
-    draw: (pass: GPURenderPassEncoder, scalarIndex: number) => draw(pass, live, scalarIndex),
+    draw(pass: GPURenderPassEncoder, scalarIndex: number) {
+      show(1);
+      draw(pass, live, scalarIndex);
+    },
     // The export's other layers are attached with their writes masked off, so one draw inside its pass adds to fire only.
-    drawExport(pass: GPURenderPassEncoder, scalarIndex: number) {
+    drawExport(pass: GPURenderPassEncoder, scalarIndex: number, weight: number) {
       exported ??= make('fsExport', [fire, ...Array.from({ length: 3 }, () => ({ format, writeMask: 0 }))]);
+      show(weight);
       draw(pass, exported, scalarIndex);
+    },
+    dispose() {
+      fade.destroy();
     },
   };
 }

@@ -58,6 +58,8 @@ export type ExportSample = {
   weight: number;
   frameTime: number;
   first: boolean;
+  // How much of the sparks to show, 0 to 1: a loop fades them across its seam.
+  sparks: number;
 };
 
 export type Renderer = ReturnType<typeof createRenderer>;
@@ -242,7 +244,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     pass.setPipeline(march);
     pass.setBindGroup(0, groups[sample.source]);
     pass.draw(3);
-    sparks.drawExport(pass, sample.source);
+    sparks.drawExport(pass, sample.source, sample.sparks);
     pass.end();
     device.queue.submit([encoder.finish()]);
   }
@@ -275,6 +277,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     },
     dispose() {
       disposeTargets();
+      sparks.dispose();
       viewBuffer.destroy();
       blendBuffer.destroy();
     },

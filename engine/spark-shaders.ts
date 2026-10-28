@@ -155,6 +155,9 @@ struct View {
 @group(0) @binding(2) var sca: texture_3d<f32>;
 @group(0) @binding(3) var lin: sampler;
 @group(0) @binding(4) var<storage, read> sparks: array<Spark, ${SPARK_COUNT}>;
+// How much of the sparks this draw shows: a looping export fades them out over its tail and in over its head.
+struct Fade { weight: f32 }
+@group(0) @binding(5) var<uniform> F: Fade;
 ` + SOLIDS + /* wgsl */ `
 // Seconds of motion a streak shows, the brightness of a fresh spark, and the steps of the occlusion march.
 const STREAK = ${(3 * DT).toFixed(5)};
@@ -220,7 +223,7 @@ fn vs(@builtin(vertex_index) corner: u32, @builtin(instance_index) i: u32) -> Ou
   // Cools from yellow through orange to dull red over its life and winks out at the end.
   let lived = s.age / s.life;
   let heat = HEAT * exp(-COOLING * lived);
-  let seen = transmittance(p);
+  let seen = transmittance(p) * F.weight;
   // A thinner or longer streak spreads the same light over fewer pixels.
   let glow = blackbody(heat) * smoothstep(1.0, 0.8, lived) * GAIN * V.exposure * seen / (w * (1.0 + len / 32.0));
   out.segment = vec4<f32>(head, tail);

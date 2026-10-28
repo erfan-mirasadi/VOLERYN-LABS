@@ -162,10 +162,13 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
       }
       const j = i - overlap;
       let source = simulation.scalarIndex;
+      // There is no kept set of sparks to blend toward, so they fade out over the loop's tail and in over its head.
+      let sparks = j < overlap ? smooth((j + 1) / overlap) : 1;
       if (i >= job.frames) {
-        const x = (i - job.frames + 1) / overlap;
-        simulation.blendLoop(i - job.frames, x * x * (3 - 2 * x));
+        const x = smooth((i - job.frames + 1) / overlap);
+        simulation.blendLoop(i - job.frames, x);
         source = LOOP_SOURCE;
+        sparks = 1 - x;
       }
       const lighting = device.createCommandEncoder();
       const pass = lighting.beginComputePass();
@@ -183,6 +186,7 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
           weight: 1 / job.samples,
           frameTime: job.stride / job.fps,
           first: s === 0,
+          sparks,
         });
       }
       const slot = j % slots;
@@ -214,3 +218,4 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
 }
 
 const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const smooth = (x: number) => x * x * (3 - 2 * x);
