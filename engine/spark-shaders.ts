@@ -199,7 +199,7 @@ fn transmittance(p: vec3<f32>) -> f32 {
     let q = (p + dir * (f32(k) + 0.5) * span - V.boxMin) / size;
     if (P.mode == 3.0 && solidDistance(q * P.size - vec3<f32>(0.5)) < 0.0) { return 0.0; }
     let s = textureSampleLevel(sca, lin, q, 0.0);
-    depth += (s.x * V.density + V.fireDensity * core(s.y)) * span;
+    depth += (s.x * V.density + max(V.fireDensity, 24.0) * core(s.y)) * span;
   }
   return exp(-depth);
 }
@@ -217,7 +217,7 @@ fn vs(@builtin(vertex_index) corner: u32, @builtin(instance_index) i: u32) -> Ou
   let scale = max(0.5, min(V.viewport.z, V.viewport.w) / 1080.0);
   // Most sparks are a couple of pixels across; a few are the big soft blobs of embers the lens does not focus.
   let u = hash(i, 1.0);
-  let radius = (1.3 + 2.5 * u * u * u) * scale;
+  let radius = (1.0 + 3.0 * u * u * u * u) * scale;
   let travel = distance(head, tail);
   let len = min(travel, 3.0 * radius);
   let along = select((tail - head) / max(travel, 1e-3), vec2<f32>(1.0, 0.0), travel < 1e-3);
@@ -229,11 +229,11 @@ fn vs(@builtin(vertex_index) corner: u32, @builtin(instance_index) i: u32) -> Ou
   out.position = vec4<f32>(px / V.viewport.zw * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.5, 1.0);
   // Cools from yellow-orange to dull red over its life, twinkles a little, and winks out at the end.
   let lived = s.age / s.life;
-  let heat = HEAT * (0.8 + 0.5 * hash(i, 2.0)) * exp(-COOLING * lived);
+  let heat = HEAT * (0.75 + 0.5 * hash(i, 2.0)) * exp(-COOLING * lived);
   let flicker = 0.8 + 0.2 * hash(i, floor(V.frame / 3.0));
   let seen = transmittance(p) * F.weight;
   // A big blurred ember spreads its light thin.
-  let glow = blackbody(heat) * smoothstep(1.0, 0.85, lived) * GAIN * flicker * V.exposure * seen / pow(radius / scale, 1.5);
+  let glow = blackbody(heat) * smoothstep(1.0, 0.85, lived) * GAIN * (0.5 + hash(i, 3.0)) * flicker * V.exposure * seen / pow(radius / scale, 1.5);
   out.segment = vec4<f32>(head, tip);
   out.colour = vec4<f32>(glow, radius);
   out.seen = seen;
