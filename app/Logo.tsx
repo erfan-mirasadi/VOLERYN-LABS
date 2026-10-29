@@ -1,18 +1,21 @@
 import Link from 'next/link';
 
-// The mark is a volume seen from its corner: the two lit faces form the V, the top face stays a wire outline.
-export function LogoMark({ size = 28 }: { size?: number }) {
+// The simulation box seen head on: six cells lit from the floor, fading as the heat rises and leaning a little with the draught.
+const CELLS: [column: number, row: number, opacity: number][] = [
+  [0, 0, 0.12],
+  [1, 0, 0.22],
+  [0, 1, 0.42],
+  [1, 1, 0.6],
+  [0, 2, 1],
+  [1, 2, 0.86],
+];
+
+export function LogoMark({ size = 24 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
-      <defs>
-        <linearGradient id="voleryn-ember" x1="0" y1="1" x2="0" y2="0">
-          <stop offset="0" stopColor="#ff7a1a" />
-          <stop offset="1" stopColor="#ffb347" />
-        </linearGradient>
-      </defs>
-      <path d="M16 16 L7 11 L7 21 L16 26 Z" fill="url(#voleryn-ember)" />
-      <path d="M16 16 L25 11 L25 21 L16 26 Z" fill="url(#voleryn-ember)" opacity="0.55" />
-      <path d="M16 6 L25 11 L16 16 L7 11 Z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+    <svg width={(size * 2) / 3} height={size} viewBox="0 0 20 30" aria-hidden="true" className="shrink-0 text-ember">
+      {CELLS.map(([column, row, opacity]) => (
+        <rect key={`${column}${row}`} x={column * 10 + 0.8} y={row * 10 + 0.8} width={8.4} height={8.4} rx={1} fill="currentColor" opacity={opacity} />
+      ))}
     </svg>
   );
 }
@@ -20,10 +23,9 @@ export function LogoMark({ size = 28 }: { size?: number }) {
 export default function Logo({ href = '/' }: { href?: string }) {
   return (
     <Link href={href} className="flex items-center gap-2.5 text-foreground">
-      <LogoMark />
-      <span className="text-sm font-semibold uppercase tracking-[0.28em]">
-        Voleryn <span className="font-normal text-muted">Labs</span>
-      </span>
+      <LogoMark size={22} />
+      <span className="text-[15px] font-medium tracking-[-0.01em]">Voleryn</span>
+      <span className="rounded-[3px] border border-line px-1.5 py-[3px] font-mono text-[9px] uppercase leading-none tracking-[0.18em] text-muted">Labs</span>
     </Link>
   );
 }
