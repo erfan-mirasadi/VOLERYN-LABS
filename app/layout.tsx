@@ -7,7 +7,7 @@ const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"]
 
 export const metadata: Metadata = {
   title: { default: "Voleryn Labs", template: "%s · Voleryn Labs" },
-  description: "Real-time fire and smoke simulation in the browser, exported as PNG or EXR sequences, flipbooks and MP4.",
+  description: "Fire, simulated. Real-time fire, smoke and explosions on your GPU, in the browser, exported as PNG and EXR sequences, flipbooks and MP4.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

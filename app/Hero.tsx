@@ -1,35 +1,31 @@
 import Link from 'next/link';
-import { GRID } from '@/engine/scene';
-import { PRESETS } from '@/presets/presets';
-import HeroDemo from './HeroDemo';
+import Chamber from './Chamber';
 
 export default function Hero() {
   return (
-    <section className="grid gap-12 py-10 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center lg:gap-16 lg:py-16">
-      <div className="flex max-w-xl flex-col gap-6">
-        <h1 className="text-balance text-4xl font-semibold leading-[1.02] tracking-tight sm:text-5xl xl:text-6xl">
-          Real-time fire and smoke in your browser.
-        </h1>
-        <p className="text-lg leading-relaxed text-muted">
-          Voleryn Labs simulates fire, smoke and explosions on your GPU and exports them with alpha, as PNG or EXR sequences, flipbooks and
-          MP4, for compositing and game engines.
+    <section className="grid gap-12 py-12 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end lg:gap-20 lg:py-20">
+      <div className="flex max-w-2xl flex-col gap-8">
+        <h1 className="text-balance text-[clamp(3rem,7.5vw,6.5rem)] font-medium leading-[0.95] tracking-[-0.035em]">Fire, simulated.</h1>
+        <p className="max-w-lg text-lg leading-relaxed text-muted">
+          Voleryn Labs runs a gas simulation on your GPU and renders fire, smoke and explosions in real time, in the browser. Export sequences, EXR
+          layers, flipbooks and video with alpha, for compositing and game engines.
         </p>
-        <Link
-          href="/studio"
-          className="mt-2 inline-flex h-11 items-center self-start rounded-full bg-ember px-6 text-sm font-medium text-black transition hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ember"
-        >
-          Open the studio
-        </Link>
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-4">
+          <Link
+            href="/studio"
+            className="inline-flex h-11 items-center rounded-md bg-ember px-5 text-sm font-medium text-black transition hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ember"
+          >
+            Open the studio
+          </Link>
+          <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted">WebGPU · Chrome, Edge or Safari 26</span>
+        </div>
       </div>
       {/* On desktop the frame shrinks with the viewport's height so the base of the fire stays above the fold. */}
-      <figure className="flex w-full max-w-[34rem] flex-col gap-3 lg:w-[min(30rem,max(20rem,calc((100vh_-_11rem)*5/6)))] xl:w-[min(34rem,max(20rem,calc((100vh_-_11rem)*5/6)))]">
-        <div className="overflow-hidden rounded-xl border border-line bg-black">
-          <HeroDemo />
-        </div>
-        <figcaption className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-xs tabular-nums text-muted">
-          <span>{PRESETS[0].name} preset</span>
-          <span>{GRID.join(' × ')} cells</span>
-          <span>drag to orbit</span>
+      <figure className="flex w-full max-w-[32rem] flex-col gap-3 lg:w-[min(32rem,max(20rem,calc((100vh_-_12rem)*5/6)))]">
+        <Chamber />
+        <figcaption className="flex justify-between font-mono text-[11px] uppercase tracking-[0.14em] text-muted">
+          <span>Live simulation</span>
+          <span>Drag to orbit</span>
         </figcaption>
       </figure>
     </section>
