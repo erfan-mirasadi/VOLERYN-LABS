@@ -24,7 +24,7 @@ export default function Logo({ href = '/' }: { href?: string }) {
   return (
     <Link href={href} className="flex items-center gap-2.5 text-foreground">
       <LogoMark size={22} />
-      <span className="text-[15px] font-medium tracking-[-0.01em]">Voleryn</span>
+      <span className="text-base font-medium tracking-[-0.01em]">Voleryn</span>
       <span className="rounded-[3px] border border-line px-1.5 py-[3px] font-mono text-[9px] uppercase leading-none tracking-[0.18em] text-muted">Labs</span>
     </Link>
   );

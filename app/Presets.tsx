@@ -2,6 +2,8 @@ import { type Box, GRID, type Preset } from '@/engine/scene';
 import { PRESETS } from '@/presets/presets';
 
 const [WIDTH, HEIGHT] = GRID;
+// Every sixteenth cell line of the box, as faint graph paper behind the setup.
+const RULINGS = [...[16, 32, 48].map((x) => `M${x} 0V${HEIGHT}`), ...[16, 32, 48, 64, 80].map((y) => `M0 ${y}H${WIDTH}`)].join('');
 const LABEL = 'font-mono text-[11px] uppercase tracking-[0.14em] text-muted';
 
 // A box's front face as it turns about y: both horizontal half-sizes project onto the view.
@@ -31,8 +33,11 @@ function Setup({ preset }: { preset: Preset }) {
           <rect width={WIDTH} height={HEIGHT} />
         </clipPath>
       </defs>
-      <rect x="0.5" y="0.5" width={WIDTH - 1} height={HEIGHT - 1} fill="none" stroke="currentColor" strokeOpacity="0.45" vectorEffect="non-scaling-stroke" className="text-muted" />
-      <g clipPath={`url(#${clip})`} fill="currentColor" fillOpacity="0.3" stroke="currentColor">
+      <g stroke="currentColor" className="text-muted" vectorEffect="non-scaling-stroke">
+        <path d={RULINGS} strokeOpacity="0.12" vectorEffect="non-scaling-stroke" />
+        <rect x="0.5" y="0.5" width={WIDTH - 1} height={HEIGHT - 1} fill="none" strokeOpacity="0.45" vectorEffect="non-scaling-stroke" />
+      </g>
+      <g clipPath={`url(#${clip})`} fill="currentColor" fillOpacity="0.3" stroke="currentColor" className="transition-[fill-opacity] duration-300 group-hover:[fill-opacity:0.55]">
         {preset.mode === 'objects' ? (
           preset.objects?.map((box, i) => (
             <rect key={i} x={box.x - faceWidth(box) / 2} y={HEIGHT - box.y - box.hy} width={faceWidth(box)} height={2 * box.hy} vectorEffect="non-scaling-stroke" />
@@ -52,7 +57,7 @@ export default function Presets() {
   return (
     <ul className="grid grid-cols-2 gap-x-6 gap-y-12 sm:grid-cols-4 sm:gap-x-8">
       {PRESETS.map((preset) => (
-        <li key={preset.id} className="flex flex-col gap-4">
+        <li key={preset.id} className="group flex flex-col gap-4">
           <Setup preset={preset} />
           <div className="flex flex-col gap-1">
             <h3 className="font-medium">{preset.name}</h3>

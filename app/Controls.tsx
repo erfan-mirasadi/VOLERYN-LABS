@@ -29,7 +29,7 @@ export default function Controls() {
       </ul>
       <dl className="flex flex-col gap-5">
         {ALSO.map(([term, detail]) => (
-          <div key={term} className="grid gap-1 text-sm sm:grid-cols-[7rem_1fr] sm:gap-4">
+          <div key={term} className="grid gap-1 text-sm sm:grid-cols-[8.5rem_1fr] sm:gap-4">
             <dt className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted sm:pt-1">{term}</dt>
             <dd className="leading-relaxed text-muted">{detail}</dd>
           </div>

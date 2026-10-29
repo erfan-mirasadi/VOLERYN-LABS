@@ -42,7 +42,7 @@ export default function Export() {
       </table>
       <dl className="flex flex-col gap-5">
         {FORMATS.map(([term, detail]) => (
-          <div key={term} className="grid gap-1 text-sm sm:grid-cols-[7rem_1fr] sm:gap-4">
+          <div key={term} className="grid gap-1 text-sm sm:grid-cols-[8.5rem_1fr] sm:gap-4">
             <dt className={`${LABEL} sm:pt-1`}>{term}</dt>
             <dd className="leading-relaxed text-muted">{detail}</dd>
           </div>
