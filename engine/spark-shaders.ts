@@ -4,7 +4,7 @@ import { BLACKBODY, HEADER, PARAMS_STRUCT, SOLIDS, TRACE } from './simulation-sh
 
 export const SPARK_COUNT = 4096;
 // A fresh spark's temperature and the one it goes out at, on the flame's blackbody scale.
-const SPARK_HEAT = 1.4;
+const SPARK_HEAT = 1.1;
 const SPARK_OUT = 0.45;
 
 // One spark: position and velocity in grid cells, age and lifetime in seconds. Dead once its age reaches its life.
@@ -67,7 +67,7 @@ fn pickBox(u: f32) -> i32 {
 // A point in the fuel: the burning gas around the emitter, or in objects mode the skin of one of the boxes.
 fn candidate(base: u32, k: u32) -> vec3<f32> {
   let u = vec3<f32>(rand(base, k), rand(base, k + 1u), rand(base, k + 2u));
-  if (P.mode != 3.0) { return P.emitter + unitVector(u.x, u.y) * 2.0 * P.radius * pow(u.z, 1.0 / 3.0); }
+  if (P.mode != 3.0) { return P.emitter + unitVector(u.x, u.y) * 2.0 * P.radius * vec3<f32>(P.width, 1.0, P.width) * pow(u.z, 1.0 / 3.0); }
   let i = pickBox(rand(base, k + 3u));
   if (i < 0) { return vec3<f32>(-10.0); }
   let placement = P.objects[2 * i];
@@ -113,7 +113,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // The blast throws burning debris out of the charge, outward and up.
     let dir = unitVector(rand(base, 2u), rand(base, 3u));
     let speed = rand(base, 5u);
-    s.pos = P.emitter + dir * P.radius * 0.8 * pow(rand(base, 4u), 1.0 / 3.0);
+    s.pos = P.emitter + dir * P.radius * vec3<f32>(P.width, 1.0, P.width) * 0.8 * pow(rand(base, 4u), 1.0 / 3.0);
     s.vel = dir * BURST_SPEED * (0.15 + 0.85 * speed * speed) + vec3<f32>(0.0, BURST_UP, 0.0);
     s.life = 0.8 + 2.4 * rand(base, 6u);
     s.age = 0.0;
@@ -121,8 +121,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   }
 }`;
 
-// Draws each live spark as a short streak along its motion, a soft line of blackbody colour at HDR intensity,
-// dimmed by the smoke and flame between it and the camera. One quad per spark, strip order.
+// Draws each live spark as a soft glowing dot of blackbody colour at HDR intensity, bigger and fainter when it is
+// one of the defocused ones, smeared into a short streak only while it moves fast, and dimmed by the smoke and flame
+// between it and the camera. One quad per spark, strip order.
 export const SPARK_DRAW = BLACKBODY + TONEMAP + SPARK_STRUCT + /* wgsl */ `
 struct View {
   camPos: vec3<f32>,
@@ -161,20 +162,21 @@ struct Fade { weight: f32 }
 ` + SOLIDS + /* wgsl */ `
 // Seconds of motion a streak shows, the brightness of a fresh spark, and the steps of the occlusion march.
 const STREAK = ${(3 * DT).toFixed(5)};
-const GAIN = 2.5;
+const GAIN = 3.0;
 const OCCLUSION_STEPS = 20;
 const HEAT = ${SPARK_HEAT.toFixed(2)};
 const COOLING = ${Math.log(SPARK_HEAT / SPARK_OUT).toFixed(4)};
 
 struct Out {
   @builtin(position) position: vec4<f32>,
-  // The streak's head and tail in pixels; its colour and half width; how much of it the gas lets through.
+  // The dot's centre and streak end in pixels; its colour and radius; how much of it the gas lets through.
   @location(0) @interpolate(flat) segment: vec4<f32>,
   @location(1) @interpolate(flat) colour: vec4<f32>,
   @location(2) @interpolate(flat) seen: f32,
 }
 
 fn toWorld(cells: vec3<f32>) -> vec3<f32> { return V.boxMin + (cells + vec3<f32>(0.5)) / P.size * (V.boxMax - V.boxMin); }
+fn hash(i: u32, k: f32) -> f32 { return fract(sin(f32(i % 4096u) * 12.9898 + k * 78.233) * 43758.5453); }
 // Pixel coordinates of a world point, shifted by the sample's jitter the way the raymarch's rays are.
 fn toPixel(p: vec3<f32>) -> vec2<f32> {
   let r = p - V.camPos;
@@ -212,22 +214,28 @@ fn vs(@builtin(vertex_index) corner: u32, @builtin(instance_index) i: u32) -> Ou
   if (dot(p - V.camPos, V.forward) < 0.05) { return out; }
   let head = toPixel(p);
   let tail = toPixel(p - s.vel / P.size.x * STREAK);
-  let len = distance(head, tail);
-  let along = select((tail - head) / len, vec2<f32>(1.0, 0.0), len < 1e-3);
+  let scale = max(0.5, min(V.viewport.z, V.viewport.w) / 1080.0);
+  // Most sparks are a couple of pixels across; a few are the big soft blobs of embers the lens does not focus.
+  let u = hash(i, 1.0);
+  let radius = (1.3 + 2.5 * u * u * u) * scale;
+  let travel = distance(head, tail);
+  let len = min(travel, 3.0 * radius);
+  let along = select((tail - head) / max(travel, 1e-3), vec2<f32>(1.0, 0.0), travel < 1e-3);
+  let tip = head + along * len;
   let across = vec2<f32>(-along.y, along.x);
-  // About two pixels wide at 1080p, scaled with the frame, never thinner than a pixel and a half.
-  let w = max(0.75, min(V.viewport.z, V.viewport.w) / 1080.0);
-  let end = select(head - along * w, tail + along * w, corner >= 2u);
-  let px = end + across * select(w, -w, (corner & 1u) == 1u);
+  let reach = 2.5 * radius;
+  let end = select(head - along * reach, tip + along * reach, corner >= 2u);
+  let px = end + across * select(reach, -reach, (corner & 1u) == 1u);
   out.position = vec4<f32>(px / V.viewport.zw * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.5, 1.0);
-  // Cools from yellow through orange to dull red over its life and winks out at the end.
+  // Cools from yellow-orange to dull red over its life, twinkles a little, and winks out at the end.
   let lived = s.age / s.life;
-  let heat = HEAT * exp(-COOLING * lived);
+  let heat = HEAT * (0.8 + 0.5 * hash(i, 2.0)) * exp(-COOLING * lived);
+  let flicker = 0.8 + 0.2 * hash(i, floor(V.frame / 3.0));
   let seen = transmittance(p) * F.weight;
-  // A thinner or longer streak spreads the same light over fewer pixels.
-  let glow = blackbody(heat) * smoothstep(1.0, 0.8, lived) * GAIN * V.exposure * seen / (w * (1.0 + len / 32.0));
-  out.segment = vec4<f32>(head, tail);
-  out.colour = vec4<f32>(glow, w);
+  // A big blurred ember spreads its light thin.
+  let glow = blackbody(heat) * smoothstep(1.0, 0.85, lived) * GAIN * flicker * V.exposure * seen / pow(radius / scale, 1.5);
+  out.segment = vec4<f32>(head, tip);
+  out.colour = vec4<f32>(glow, radius);
   out.seen = seen;
   return out;
 }
@@ -237,8 +245,8 @@ fn profile(in: Out) -> f32 {
   let ab = in.segment.zw - a;
   let t = clamp(dot(in.position.xy - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
   let d = distance(in.position.xy, a + ab * t) / in.colour.w;
-  let x = max(1.0 - d * d, 0.0);
-  return x * x;
+  // A bright core with a faint halo around it.
+  return exp(-2.0 * d * d) + 0.25 * exp(-0.45 * d * d);
 }
 
 @fragment

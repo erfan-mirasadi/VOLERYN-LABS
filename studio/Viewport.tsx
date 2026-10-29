@@ -3,6 +3,7 @@
 import { presetById } from '@/presets/presets';
 import FireCanvas from './FireCanvas';
 import TimingHud from './TimingHud';
+import WindGizmo from './WindGizmo';
 import { useStudioStore } from './useStudioStore';
 
 const BACKDROP_CLASS = {
@@ -28,6 +29,7 @@ export default function Viewport() {
       <div className="absolute left-3 top-3">
         <TimingHud />
       </div>
+      {status === 'ready' && <WindGizmo />}
       {status === 'ready' && (
         <button
           type="button"

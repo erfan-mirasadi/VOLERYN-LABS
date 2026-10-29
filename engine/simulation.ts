@@ -138,12 +138,12 @@ export function createSimulation(device: GPUDevice) {
     paramData.set([
       ...GRID, dt,
       time, preset.buoyancy * tweaks.heat, preset.cooling, tweaks.vorticity,
-      tweaks.wind, 0, 0, preset.burn,
+      tweaks.wind * Math.cos((tweaks.windYaw * Math.PI) / 180), 0, tweaks.wind * Math.sin((tweaks.windYaw * Math.PI) / 180), preset.burn,
       ...preset.emitter, preset.radius,
-      emitting ? preset.emit : 0, preset.smokeYield, preset.heat * tweaks.heat, preset.dissipation,
+      emitting ? preset.emit : 0, preset.smokeYield * tweaks.smoke, preset.heat * tweaks.heat, preset.dissipation,
       ...LIGHT, MODE_INDEX[preset.mode],
       preset.turbulence, preset.damping, preset.expansion, blast,
-      preset.ignite, tweaks.seed, 0, 0,
+      preset.ignite, tweaks.seed, tweaks.width, 0,
       ...boxData,
     ]);
     device.queue.writeBuffer(paramSlots[slot], 0, paramData);

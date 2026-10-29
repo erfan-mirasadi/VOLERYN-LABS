@@ -17,10 +17,10 @@
   "expansion": 0.02,
   "tint": [0.2, 0.19, 0.18],
   "glow": 0.8,
-  "fireDensity": 20,
+  "fireDensity": 10,
   "ignite": 0.3,
   "detail": 1.5,
-  "blue": 0.4,
+  "blue": 0,
   "sparks": 0.7,
   "objects": [
     { "x": 24, "y": 7, "z": 32, "yaw": 0.35, "hx": 11, "hy": 3.5, "hz": 3.5 },

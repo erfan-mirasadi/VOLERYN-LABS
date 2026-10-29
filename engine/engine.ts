@@ -2,7 +2,7 @@ import { createFireSound, type FireSound } from './fire-sound';
 import { requestGpu } from './gpu';
 import { GpuTimer } from './gpu-timer';
 import { type OfflineJob, type RenderedFrame, renderOffline } from './offline-render';
-import { createRenderer, type Vec3 } from './render';
+import { cameraBasis, createRenderer, type Vec3 } from './render';
 import { BLAST_DECAY, type Box, BURST_EVERY, DT, GRID, MAX_BOXES, type Preset, type Tweaks } from './scene';
 import { createSimulation } from './simulation';
 
@@ -47,7 +47,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   const timer = new GpuTimer(device, hasTimestamps);
 
   let preset = initialPreset;
-  let tweaks: Tweaks = { heat: 1, vorticity: initialPreset.vorticity, wind: 0, seed: 0, blue: initialPreset.blue, sparks: initialPreset.sparks  };
+  let tweaks: Tweaks = { heat: 1, vorticity: initialPreset.vorticity, wind: 0, windYaw: 0, seed: 0, blue: initialPreset.blue, sparks: initialPreset.sparks, smoke: 1, width: 1 };
   let boxes: Box[] = initialPreset.objects?.map((box) => ({ ...box })) ?? [];
   let simTime = 0;
   let burstStart = 0;
@@ -259,7 +259,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     lost: onDeviceLost,
     setPreset(next: Preset) {
       preset = next;
-      tweaks = { heat: 1, vorticity: next.vorticity, wind: 0, seed: tweaks.seed, blue: next.blue, sparks: next.sparks  };
+      tweaks = { ...tweaks, heat: 1, vorticity: next.vorticity, wind: 0, blue: next.blue, sparks: next.sparks, smoke: 1, width: 1 };
       boxes = next.objects?.map((box) => ({ ...box })) ?? [];
       simulation.clear();
       renderer.resetHistory();
@@ -284,6 +284,26 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
         sound.listen(eye(), target);
       }
       syncSound();
+    },
+    // Canvas pixel of a world point, or null behind the camera; and the floor point under a canvas pixel.
+    project(point: Vec3): [number, number] | null {
+      const camera = { eye: eye(), target, tanHalfFov: Math.tan(FOV / 2) };
+      const { forward, right, up } = cameraBasis(camera);
+      const r = point.map((v, i) => v - camera.eye[i]) as Vec3;
+      const z = dot(r, forward);
+      if (z <= 0.01) return null;
+      const aspect = canvas.clientWidth / canvas.clientHeight;
+      return [(0.5 + (0.5 * dot(r, right)) / (z * camera.tanHalfFov * aspect)) * canvas.clientWidth, (0.5 - (0.5 * dot(r, up)) / (z * camera.tanHalfFov)) * canvas.clientHeight];
+    },
+    floorPoint(x: number, y: number): Vec3 | null {
+      const camera = { eye: eye(), target, tanHalfFov: Math.tan(FOV / 2) };
+      const { forward, right, up } = cameraBasis(camera);
+      const sx = (2 * (x / canvas.clientWidth) - 1) * camera.tanHalfFov * (canvas.clientWidth / canvas.clientHeight);
+      const sy = (1 - 2 * (y / canvas.clientHeight)) * camera.tanHalfFov;
+      const dir = forward.map((f, i) => f + right[i] * sx + up[i] * sy) as Vec3;
+      if (dir[1] >= -1e-4) return null;
+      const t = -camera.eye[1] / dir[1];
+      return camera.eye.map((e, i) => e + dir[i] * t) as Vec3;
     },
     // Everything an export needs to be re-rendered later.
     snapshot() {
@@ -363,3 +383,5 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     },
   };
 }
+
+const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];

@@ -66,7 +66,8 @@ export type Preset = {
 };
 
 // Live tweaks the studio layers over a preset without changing the preset itself.
-export type Tweaks = { heat: number; vorticity: number; wind: number; seed: number; blue: number; sparks: number };
+// Wind blows along windYaw degrees from +x towards +z; smoke scales the preset's yield; width stretches the emitter sideways.
+export type Tweaks = { heat: number; vorticity: number; wind: number; windYaw: number; seed: number; blue: number; sparks: number; smoke: number; width: number };
 
 export const MODE_INDEX: Record<EmitterMode, number> = { fire: 0, smoke: 1, explosion: 2, objects: 3 };
 

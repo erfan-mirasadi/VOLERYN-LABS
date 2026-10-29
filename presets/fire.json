@@ -17,9 +17,9 @@
   "expansion": 0.02,
   "tint": [0.2, 0.19, 0.18],
   "glow": 0.8,
-  "fireDensity": 24,
+  "fireDensity": 12,
   "ignite": 0.3,
   "detail": 1.5,
-  "blue": 0.5,
+  "blue": 0,
   "sparks": 0.4
 }

@@ -23,7 +23,9 @@ const KEY_STRENGTH = ${KEY_STRENGTH.toFixed(3)};
 const SKY_COLOR = ${vec3(SKY_COLOR)};
 const GROUND_COLOR = ${vec3(GROUND_COLOR)};
 const NOISE_PERIOD = ${NOISE_PERIOD.toFixed(1)};
-const BLUE_FLAME = vec3<f32>(1.2, 2.8, 10.0);
+const BLUE_FLAME = vec3<f32>(0.5, 1.4, 4.5);
+// Emission per unit of extinction: the flame is thin enough to see through, so its light is turned up.
+const FLAME_GAIN = 2.0;
 const ALBEDO = vec3<f32>(0.03, 0.025, 0.02);
 struct View {
   camPos: vec3<f32>,
@@ -176,24 +178,28 @@ fn march(frag: vec2<f32>) -> March {
       let nA = textureSampleLevel(noise, rep, (g + textureSampleLevel(flowA, lin, q, 0.0).xyz) * stretch, 0.0);
       let nB = textureSampleLevel(noise, rep, (g + textureSampleLevel(flowB, lin, q, 0.0).xyz) * stretch, 0.0);
       let n = mix(nB, nA, V.flowWeight) - vec4<f32>(0.5);
+      // A finer octave on the same fields tears the tongues into wisps.
+      let fA = textureSampleLevel(noise, rep, (g + textureSampleLevel(flowA, lin, q, 0.0).xyz) * stretch * 2.7 + vec3<f32>(0.37), 0.0);
+      let fB = textureSampleLevel(noise, rep, (g + textureSampleLevel(flowB, lin, q, 0.0).xyz) * stretch * 2.7 + vec3<f32>(0.37), 0.0);
+      let f = mix(fB, fA, V.flowWeight) - vec4<f32>(0.5);
       let gate = smoothstep(0.15, 0.6, s.y) * (1.0 - 0.5 * smoothstep(1.2, 2.5, s.y));
-      s = textureSampleLevel(sca, lin, q + n.xyz * 2.0 * V.detail * gate / P.size, 0.0);
-      breakup = 1.0 + 1.2 * n.w * gate;
+      s = textureSampleLevel(sca, lin, q + (n.xyz * 2.0 + f.xyz * 0.8) * V.detail * gate / P.size, 0.0);
+      breakup = 1.0 + (1.2 * n.w + 0.9 * f.w) * gate;
     }
     // Where fuel is burning right now the flame is hottest and whitest; the burnt gas around it is dimmer and more
     // orange. Fuel burns lean and blue where it enters, along the floor of the emitter or the skin of a solid, and
     // that layer glows blue through almost no soot; above it the soot takes over and the flame goes yellow.
     let reaction = smoothstep(1.0, 10.0, s.w);
-    let fresh = select(1.0 - smoothstep(0.0, 0.6 * P.radius, g.y - max(P.emitter.y - P.radius, 0.0)), 1.0 - smoothstep(1.0, 3.0, sd), P.mode == 3.0);
+    let fresh = select(1.0 - smoothstep(0.0, 0.4 * P.radius, g.y - max(P.emitter.y - P.radius, 0.0)), 1.0 - smoothstep(1.0, 2.5, sd), P.mode == 3.0);
     let lean = min(2.0 * V.blue, 1.0) * reaction * fresh;
     let light = textureSampleLevel(shade, lin, q, 0.0);
     let flameLight = lightHere.rgb * V.fireLight * V.fire;
     let sigmaSmoke = s.x * V.density;
-    let sigmaFire = V.fireDensity * flame(s.y) * breakup * (1.0 - 0.9 * lean);
+    let sigmaFire = V.fireDensity * flame(s.y) * breakup * (1.0 - 0.95 * lean);
     let sigma = sigmaSmoke + sigmaFire;
     let opacity = 1.0 - exp(-sigma * V.stepSize);
     let reach = transmittance * opacity / max(sigma, 1e-4);
-    m.fire += reach * sigmaFire * blackbody(s.y + 0.5 * reaction) * (0.7 + 0.5 * reaction) * V.fire;
+    m.fire += reach * sigmaFire * blackbody(s.y + 0.5 * reaction) * (0.7 + 0.5 * reaction) * FLAME_GAIN * V.fire;
     m.fire += transmittance * V.stepSize * lean * BLUE_FLAME * V.fire;
     // Wrenninge octaves: each softer and weaker, standing in for light scattered more than once; the weights sum to
     // one so an unshadowed cell gets exactly the key.

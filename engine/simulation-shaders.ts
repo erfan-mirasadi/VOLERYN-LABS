@@ -24,7 +24,7 @@ struct Params {
   blast: f32,
   ignite: f32,
   seed: f32,
-  pad2: f32,
+  width: f32,
   pad3: f32,
   objects: array<vec4<f32>, 8>,
 }
@@ -214,7 +214,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       q.y += amount * 0.25;
     }
   } else {
-    let d = length(p - P.emitter) / P.radius;
+    let d = length((p - P.emitter) / (P.radius * vec3<f32>(P.width, 1.0, P.width)));
     if (d < 1.0) {
       var amount = (1.0 - d * d) * (0.35 + 1.3 * flicker) * P.emit * P.dt;
       // An explosion needs a lumpy charge; an even ball of fuel burns into a perfect sphere.
@@ -305,7 +305,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let rise = vec3<f32>(0.0, -12.0 * P.time, 0.0) + seedShift();
   let stirring = textureSampleLevel(stir, rep, (p + rise) / 24.0, 0.0).xyz;
   v += P.dt * P.turbulence * stirring * clamp(s.y + 0.3 * s.x + 0.05 * s.w, 0.0, 1.5);
-  let d = length(p - P.emitter) / P.radius;
+  let d = length((p - P.emitter) / (P.radius * vec3<f32>(P.width, 1.0, P.width)));
   if (d < 1.0) {
     v.y += P.dt * P.emit * 0.8 * (1.0 - d);
   }
@@ -353,7 +353,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   // Burning gas expands, and a blast pushes out from the charge: the solve targets this much divergence instead of
   // none, so the push goes through the projection instead of being stripped by it. The blast is uneven, so the
   // fireball breaks into lobes instead of staying a ball.
-  let d = length(vec3<f32>(c) - P.emitter) / P.radius;
+  let d = length((vec3<f32>(c) - P.emitter) / (P.radius * vec3<f32>(P.width, 1.0, P.width)));
   let lumps = 0.2 + 1.6 * noise3(vec3<f32>(c) * 0.12 + vec3<f32>(0.0, 0.0, 0.1 * P.time));
   let expansion = P.expansion * textureLoad(sca, c, 0).w + P.blast * max(1.0 - d * d, 0.0) * lumps;
   textureStore(dst, c, vec4<f32>(div - expansion, 0.0, 0.0, 0.0));

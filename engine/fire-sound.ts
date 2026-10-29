@@ -73,10 +73,10 @@ export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
   gust.connect(wind.gain);
 
   const world = (cell: number, axis: 0 | 1 | 2) => BOX_MIN[axis] + ((cell + 0.5) / GRID[axis]) * (BOX_MAX[axis] - BOX_MIN[axis]);
-  const place = (node: PannerNode, cell: readonly number[], lean: number, rise: number) => {
-    glide(node.positionX, world(cell[0], 0) + lean);
+  const place = (node: PannerNode, cell: readonly number[], lean: [number, number], rise: number) => {
+    glide(node.positionX, world(cell[0], 0) + lean[0]);
     glide(node.positionY, world(cell[1], 1) + rise);
-    glide(node.positionZ, world(cell[2], 2));
+    glide(node.positionZ, world(cell[2], 2) + lean[1]);
   };
 
   let rest = { rumble: 0, roar: 0, cutoff: 500 };
@@ -96,13 +96,15 @@ export function createFireSound(ctx: BaseAudioContext, orbitDistance: number) {
     // Emitting cells: the 2.5-cell skin at mean weight 0.5 around each box, or the (1 - d²) ball of the fire kernel.
     const cells = objects
       ? boxes.reduce((sum, b) => sum + 10 * (b.hx * b.hy + b.hy * b.hz + b.hz * b.hx), 0)
-      : 0.4 * (4 / 3) * Math.PI * preset.radius ** 3;
+      : 0.4 * (4 / 3) * Math.PI * preset.radius ** 3 * tweaks.width ** 2;
     const burning = preset.mode !== 'explosion';
     const power = burning ? (preset.emit * preset.heat * cells) / 47600 : 0;
     const flow = burning ? (preset.emit * cells) / 36600 : 0;
     const centre = objects ? (['x', 'y', 'z'] as const).map((key) => boxes.reduce((sum, b) => sum + b[key], 0) / boxes.length) : preset.emitter;
-    place(base, centre, 0, 0);
-    place(plume, centre, (0.5 * tweaks.wind) / 60, 0.7);
+    const yaw = (tweaks.windYaw * Math.PI) / 180;
+    const lean = (0.5 * tweaks.wind) / 60;
+    place(base, centre, [0, 0], 0);
+    place(plume, centre, [lean * Math.cos(yaw), lean * Math.sin(yaw)], 0.7);
 
     // Heat is the loudest control: a hot fire roars louder and brighter, a cool one murmurs low.
     rest = { rumble: 0.35 * Math.sqrt(power) * h * h, roar: 0.3 * Math.sqrt(power) * h ** 1.5, cutoff: 150 + 700 * Math.min(1.5, (preset.buoyancy * h) / 40) };
