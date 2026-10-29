@@ -29,7 +29,7 @@ export default function Specs() {
   return (
     <section className="flex flex-col gap-20 border-t border-line py-20 lg:gap-28 lg:py-28">
       {GROUPS.map(({ title, lead, rows }) => (
-        <div key={title} className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,34rem)] lg:gap-16">
+        <div key={title} className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,30rem)] lg:gap-16 xl:grid-cols-[minmax(0,1fr)_minmax(0,34rem)]">
           <div className="flex max-w-xl flex-col gap-4">
             <h2 className="text-3xl font-semibold tracking-tight">{title}</h2>
             <p className="text-lg leading-relaxed text-muted">{lead}</p>

@@ -7,7 +7,7 @@ export default function Hero() {
   return (
     <section className="grid gap-12 py-10 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center lg:gap-16 lg:py-16">
       <div className="flex max-w-xl flex-col gap-6">
-        <h1 className="text-balance text-4xl font-semibold leading-[1.02] tracking-tight sm:text-5xl lg:text-6xl">
+        <h1 className="text-balance text-4xl font-semibold leading-[1.02] tracking-tight sm:text-5xl xl:text-6xl">
           Real-time fire and smoke in your browser.
         </h1>
         <p className="text-lg leading-relaxed text-muted">
@@ -22,7 +22,7 @@ export default function Hero() {
         </Link>
       </div>
       {/* On desktop the frame shrinks with the viewport's height so the base of the fire stays above the fold. */}
-      <figure className="flex w-full max-w-[34rem] flex-col gap-3 lg:w-[min(34rem,max(20rem,calc((100vh_-_11rem)*5/6)))]">
+      <figure className="flex w-full max-w-[34rem] flex-col gap-3 lg:w-[min(30rem,max(20rem,calc((100vh_-_11rem)*5/6)))] xl:w-[min(34rem,max(20rem,calc((100vh_-_11rem)*5/6)))]">
         <div className="overflow-hidden rounded-xl border border-line bg-black">
           <HeroDemo />
         </div>
