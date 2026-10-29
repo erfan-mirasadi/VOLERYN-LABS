@@ -9,7 +9,7 @@ export default function Home() {
       <header className="mx-auto flex w-full max-w-6xl items-center justify-between px-6 py-6 sm:px-8">
         <Logo />
         <Link href="/studio" className="text-sm text-muted transition-colors hover:text-foreground">
-          Open studio
+          Open the studio
         </Link>
       </header>
 
