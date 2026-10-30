@@ -3,8 +3,8 @@ import type { Volumes } from './simulation';
 import { SPARK_COUNT, SPARK_DRAW, SPARK_STEP } from './spark-shaders';
 
 // Sparks per second the whole pool spawns at full strength, and how many an explosion throws per unit of blast.
-const SPAWN_RATE = 100;
-const BURST_PER_BLAST = 30;
+const SPAWN_RATE = 800;
+const BURST_PER_BLAST = 120;
 const FLOATS_PER_SPARK = 8;
 const WORKGROUP = 64;
 const ADD: GPUBlendComponent = { srcFactor: 'one', dstFactor: 'one', operation: 'add' };
