@@ -4,7 +4,7 @@ import { BLACKBODY, HEADER, PARAMS_STRUCT, SOLIDS, TRACE } from './simulation-sh
 
 export const SPARK_COUNT = 4096;
 // A fresh spark's temperature and the one it goes out at, on the flame's blackbody scale.
-const SPARK_HEAT = 1.1;
+const SPARK_HEAT = 1.15;
 const SPARK_OUT = 0.45;
 
 // One spark: position and velocity in grid cells, age and lifetime in seconds. Dead once its age reaches its life.
@@ -161,8 +161,8 @@ struct Fade { weight: f32 }
 @group(0) @binding(5) var<uniform> F: Fade;
 ` + SOLIDS + /* wgsl */ `
 // Seconds of motion a streak shows, the brightness of a fresh spark, and the steps of the occlusion march.
-const STREAK = ${(3 * DT).toFixed(5)};
-const GAIN = 2.2;
+const STREAK = ${(2 * DT).toFixed(5)};
+const GAIN = 2.6;
 const OCCLUSION_STEPS = 20;
 const HEAT = ${SPARK_HEAT.toFixed(2)};
 const COOLING = ${Math.log(SPARK_HEAT / SPARK_OUT).toFixed(4)};
@@ -221,7 +221,7 @@ fn vs(@builtin(vertex_index) corner: u32, @builtin(instance_index) i: u32) -> Ou
   let u = hash(i, 1.0);
   let radius = max((0.85 + 0.55 * u * u + 1.7 * pow(u, 8.0)) * scale * (0.75 + 0.25 * (1.0 - lived)), 0.9);
   let travel = distance(head, tail);
-  let len = min(travel, 8.0 * radius);
+  let len = min(travel, 6.0 * radius);
   let along = select((tail - head) / max(travel, 1e-3), vec2<f32>(1.0, 0.0), travel < 1e-3);
   let tip = head + along * len;
   let across = vec2<f32>(-along.y, along.x);
@@ -234,7 +234,7 @@ fn vs(@builtin(vertex_index) corner: u32, @builtin(instance_index) i: u32) -> Ou
   let flicker = 0.75 + 0.25 * hash(i, floor(V.frame / 2.0));
   let seen = transmittance(p) * F.weight;
   // A big blurred ember spreads its light thin, and a fast one smears it along its streak.
-  let spread = pow(radius / scale, 1.5) * (1.0 + 0.3 * len / radius);
+  let spread = pow(radius / scale, 1.5) * (1.0 + 0.2 * len / radius);
   let glow = blackbody(heat) * smoothstep(1.0, 0.85, lived) * GAIN * (0.5 + hash(i, 3.0)) * flicker * V.exposure * seen / spread;
   out.segment = vec4<f32>(head, tip);
   out.colour = vec4<f32>(glow, radius);
