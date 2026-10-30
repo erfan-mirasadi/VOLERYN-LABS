@@ -121,9 +121,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   }
 }`;
 
-// Draws each live spark as a soft glowing dot of blackbody colour at HDR intensity, bigger and fainter when it is
-// one of the defocused ones, smeared into a short streak only while it moves fast, and dimmed by the smoke and flame
-// between it and the camera. One quad per spark, strip order.
+// Draws each live spark as a point of blackbody colour a pixel or two across with a faint bloom, shrinking as it
+// burns down; the few big fragments and the rare defocused ember are larger and dimmer, a fast one smears into a thin
+// streak, and all are dimmed by the smoke and flame between them and the camera. One quad per spark, strip order.
 export const SPARK_DRAW = BLACKBODY + TONEMAP + SPARK_STRUCT + /* wgsl */ `
 struct View {
   camPos: vec3<f32>,
@@ -162,7 +162,7 @@ struct Fade { weight: f32 }
 ` + SOLIDS + /* wgsl */ `
 // Seconds of motion a streak shows, the brightness of a fresh spark, and the steps of the occlusion march.
 const STREAK = ${(3 * DT).toFixed(5)};
-const GAIN = 3.0;
+const GAIN = 2.2;
 const OCCLUSION_STEPS = 20;
 const HEAT = ${SPARK_HEAT.toFixed(2)};
 const COOLING = ${Math.log(SPARK_HEAT / SPARK_OUT).toFixed(4)};
@@ -214,26 +214,28 @@ fn vs(@builtin(vertex_index) corner: u32, @builtin(instance_index) i: u32) -> Ou
   if (dot(p - V.camPos, V.forward) < 0.05) { return out; }
   let head = toPixel(p);
   let tail = toPixel(p - s.vel / P.size.x * STREAK);
-  let scale = max(0.5, min(V.viewport.z, V.viewport.w) / 1080.0);
-  // Most sparks are a couple of pixels across; a few are the big soft blobs of embers the lens does not focus.
+  let scale = max(0.6, min(V.viewport.z, V.viewport.w) / 1080.0);
+  let lived = s.age / s.life;
+  // Most embers are a point a pixel or two across that shrinks as it burns down; a few are bigger fragments, and the
+  // rare one the lens does not focus is a soft blob.
   let u = hash(i, 1.0);
-  let radius = (1.0 + 3.0 * u * u * u * u) * scale;
+  let radius = max((0.85 + 0.55 * u * u + 1.7 * pow(u, 8.0)) * scale * (0.75 + 0.25 * (1.0 - lived)), 0.9);
   let travel = distance(head, tail);
-  let len = min(travel, 3.0 * radius);
+  let len = min(travel, 8.0 * radius);
   let along = select((tail - head) / max(travel, 1e-3), vec2<f32>(1.0, 0.0), travel < 1e-3);
   let tip = head + along * len;
   let across = vec2<f32>(-along.y, along.x);
-  let reach = 2.5 * radius;
+  let reach = 3.0 * radius;
   let end = select(head - along * reach, tip + along * reach, corner >= 2u);
   let px = end + across * select(reach, -reach, (corner & 1u) == 1u);
   out.position = vec4<f32>(px / V.viewport.zw * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.5, 1.0);
-  // Cools from yellow-orange to dull red over its life, twinkles a little, and winks out at the end.
-  let lived = s.age / s.life;
-  let heat = HEAT * (0.75 + 0.5 * hash(i, 2.0)) * exp(-COOLING * lived);
-  let flicker = 0.8 + 0.2 * hash(i, floor(V.frame / 3.0));
+  // Cools from yellow-orange to dull red over its life, twinkles as it tumbles, and winks out at the end.
+  let heat = HEAT * (0.8 + 0.4 * hash(i, 2.0)) * exp(-COOLING * lived);
+  let flicker = 0.75 + 0.25 * hash(i, floor(V.frame / 2.0));
   let seen = transmittance(p) * F.weight;
-  // A big blurred ember spreads its light thin.
-  let glow = blackbody(heat) * smoothstep(1.0, 0.85, lived) * GAIN * (0.5 + hash(i, 3.0)) * flicker * V.exposure * seen / pow(radius / scale, 1.5);
+  // A big blurred ember spreads its light thin, and a fast one smears it along its streak.
+  let spread = pow(radius / scale, 1.5) * (1.0 + 0.3 * len / radius);
+  let glow = blackbody(heat) * smoothstep(1.0, 0.85, lived) * GAIN * (0.5 + hash(i, 3.0)) * flicker * V.exposure * seen / spread;
   out.segment = vec4<f32>(head, tip);
   out.colour = vec4<f32>(glow, radius);
   out.seen = seen;
@@ -245,8 +247,8 @@ fn profile(in: Out) -> f32 {
   let ab = in.segment.zw - a;
   let t = clamp(dot(in.position.xy - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
   let d = distance(in.position.xy, a + ab * t) / in.colour.w;
-  // A bright core with a faint halo around it.
-  return exp(-2.0 * d * d) + 0.25 * exp(-0.45 * d * d);
+  // A tight bright core with the faint bloom of a hot point.
+  return exp(-2.5 * d * d) + 0.06 * exp(-0.35 * d * d);
 }
 
 @fragment
