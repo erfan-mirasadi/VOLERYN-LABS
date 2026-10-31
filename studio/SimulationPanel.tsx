@@ -1,8 +1,17 @@
 'use client';
 
+import { QUALITIES, type QualityId } from '@/engine/scene';
 import { PRESETS, presetById } from '@/presets/presets';
 import { SLIDERS } from './controls';
 import { type Backdrop, useStudioStore } from './useStudioStore';
+
+// What each preview quality spends, in the words of the person choosing it.
+const QUALITY_NOTES: Record<QualityId, string> = {
+  fast: 'Coarse march, scales down to half size for 60 fps.',
+  balanced: 'The base grid, full size at 60 fps where the GPU allows.',
+  fine: 'A 96 × 144 × 96 grid, finer light and march, aimed at 30 fps. Restarts the fire.',
+  ultra: 'A 128 × 192 × 128 grid: eight times the cells, for strong GPUs. Restarts the fire.',
+};
 
 const BACKDROPS: { id: Backdrop; label: string }[] = [
   { id: 'checker', label: 'Checker' },
@@ -14,7 +23,7 @@ export const chip = (active: boolean) =>
   `rounded-full px-3 py-1 text-sm transition-colors ${active ? 'bg-foreground text-background' : 'text-muted hover:text-foreground'}`;
 
 export default function SimulationPanel() {
-  const { presetId, tweaks, backdrop, status, exporting, setPreset, setTweak, addCube, setBackdrop } = useStudioStore();
+  const { presetId, tweaks, backdrop, quality, status, exporting, setPreset, setTweak, addCube, setBackdrop, setQuality } = useStudioStore();
   const disabled = status !== 'ready' || exporting;
   const preset = presetById(presetId);
 
@@ -53,6 +62,18 @@ export default function SimulationPanel() {
             <span className="text-right font-mono text-xs tabular-nums text-muted">{tweaks[key]}</span>
           </label>
         ))}
+      </fieldset>
+
+      <fieldset disabled={exporting} className="flex flex-col gap-2">
+        <legend className="mb-2 text-xs uppercase tracking-wider text-muted">Preview</legend>
+        <div className="flex flex-wrap gap-1 self-start rounded-full border border-line p-1">
+          {(Object.keys(QUALITIES) as QualityId[]).map((id) => (
+            <button key={id} type="button" onClick={() => setQuality(id)} aria-pressed={id === quality} className={chip(id === quality)}>
+              {id[0].toUpperCase() + id.slice(1)}
+            </button>
+          ))}
+        </div>
+        <p className="text-xs text-muted">{QUALITY_NOTES[quality]}</p>
       </fieldset>
 
       <fieldset className="flex flex-col gap-2">

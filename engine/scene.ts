@@ -1,9 +1,30 @@
+// The base grid: every cell value in a preset refers to it, and the engine scales those to the grid it runs.
 export const GRID = [64, 96, 64] as const;
-export const SHADOW_GRID = [32, 48, 32] as const;
-// The flame's light volume: one cell per LIGHT_SCALE simulation cells, blurred LIGHT_BLUR_PASSES times.
-export const LIGHT_SCALE = 4;
-export const LIGHT_GRID = GRID.map((n) => n / LIGHT_SCALE) as [number, number, number];
+
+// What a preview or an export spends: the simulation grid, how coarse the flame's light volume is, how densely
+// the raymarch steps (in base-grid cells) and how the live resolution may scale to hold the target frame rate.
+export type Quality = {
+  grid: readonly [number, number, number];
+  lightScale: number;
+  stepCells: number;
+  maxSteps: number;
+  scaleMin: number;
+  scaleMax: number;
+  targetFps: number;
+};
+
+export const QUALITIES = {
+  fast: { grid: GRID, lightScale: 4, stepCells: 2, maxSteps: 128, scaleMin: 0.5, scaleMax: 0.875, targetFps: 60 },
+  balanced: { grid: GRID, lightScale: 4, stepCells: 1.5, maxSteps: 160, scaleMin: 0.625, scaleMax: 1, targetFps: 60 },
+  fine: { grid: [96, 144, 96], lightScale: 2, stepCells: 1, maxSteps: 240, scaleMin: 0.75, scaleMax: 1, targetFps: 30 },
+  ultra: { grid: [128, 192, 128], lightScale: 2, stepCells: 0.75, maxSteps: 320, scaleMin: 0.75, scaleMax: 1, targetFps: 30 },
+} as const satisfies Record<string, Quality>;
+export type QualityId = keyof typeof QUALITIES;
+
+// The flame's light volume on the base grid: one cell per four simulation cells, blurred in three ping-pong pairs.
+// A finer grid or light volume blurs more times, so the light spreads over the same distance in the world.
 export const LIGHT_BLUR_PASSES = 3;
+export const lightBlurDispatches = ({ grid, lightScale }: Quality) => Math.min(16, Math.round((LIGHT_BLUR_PASSES * 2 * 4 * grid[0]) / (64 * lightScale)));
 export const FIRE_LIGHT = 12;
 export const DT = 1 / 60;
 export const DENSITY = 14;

@@ -20,6 +20,7 @@ export default function TimingHud() {
   const rows: [string, string][] = [
     ['fps', `${stats.fps.toFixed(0)} / ${stats.displayHz.toFixed(0)}`],
     ['scale', `${Math.round(stats.renderScale * 100)}%`],
+    ['render', `${stats.renderWidth} × ${stats.renderHeight}`],
     ['gpu frame', stats.hasTimestamps ? `${stats.gpuMs.toFixed(2)} ms` : 'no timestamps'],
     ['simulation', `${stats.simulationMs.toFixed(2)} ms`],
     ['lighting', `${stats.lightingMs.toFixed(2)} ms`],

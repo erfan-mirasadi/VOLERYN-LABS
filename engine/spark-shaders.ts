@@ -23,8 +23,8 @@ struct Spawn { rate: f32, burst: f32 }
 @group(0) @binding(4) var lin: sampler;
 @group(0) @binding(5) var<uniform> S: Spawn;
 ${TRACE}
-// Seconds a spark takes to pick up the gas velocity, how fast it sinks through the gas in cells/s², the random
-// tumble it adds each step, and the pop that throws it out of the fuel, in cells/s.
+// Seconds a spark takes to pick up the gas velocity, how fast it sinks through the gas in base cells/s², the random
+// tumble it adds each step, and the pop that throws it out of the fuel, in base cells/s.
 const DRAG = 0.25;
 const SETTLE = 30.0;
 const TUMBLE = 30.0;
@@ -71,12 +71,12 @@ fn candidate(base: u32, k: u32) -> vec3<f32> {
   let i = pickBox(rand(base, k + 3u));
   if (i < 0) { return vec3<f32>(-10.0); }
   let placement = P.objects[2 * i];
-  let local = (2.0 * u - vec3<f32>(1.0)) * (P.objects[2 * i + 1].xyz + vec3<f32>(SKIN));
+  let local = (2.0 * u - vec3<f32>(1.0)) * (P.objects[2 * i + 1].xyz + vec3<f32>(SKIN * cellScale()));
   let c = cos(placement.w);
   let s = sin(placement.w);
   let p = placement.xyz + vec3<f32>(c * local.x - s * local.z, local.y, s * local.x + c * local.z);
   let sd = solidDistance(p);
-  return select(vec3<f32>(-10.0), p, sd >= 0.0 && sd < SKIN);
+  return select(vec3<f32>(-10.0), p, sd >= 0.0 && sd < SKIN * cellScale());
 }
 
 @compute @workgroup_size(64)
@@ -84,10 +84,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let i = id.x;
   var s = sparks[i];
   let base = pcg(i ^ pcg(bitcast<u32>(P.time) ^ pcg(bitcast<u32>(P.seed) + 0x9e3779b9u)));
+  let cells = cellScale();
   if (s.age < s.life) {
     var v = mix(s.vel, velocityAt(s.pos), 1.0 - exp(-P.dt / DRAG));
-    v.y -= SETTLE * P.dt;
-    v += (vec3<f32>(rand(base, 0u), rand(base, 1u), rand(base, 2u)) - vec3<f32>(0.5)) * TUMBLE * sqrt(P.dt);
+    v.y -= SETTLE * cells * P.dt;
+    v += (vec3<f32>(rand(base, 0u), rand(base, 1u), rand(base, 2u)) - vec3<f32>(0.5)) * TUMBLE * cells * sqrt(P.dt);
     s.pos += v * P.dt;
     s.vel = v;
     s.age += P.dt;
@@ -103,7 +104,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       let r = rand(base, 24u);
       let pop = rand(base, 27u);
       s.pos = p;
-      s.vel = velocityAt(p) + unitVector(rand(base, 25u), rand(base, 26u)) * POP * pop * pop + vec3<f32>(0.0, POP_UP * (0.5 + rand(base, 28u)), 0.0);
+      s.vel = velocityAt(p) + unitVector(rand(base, 25u), rand(base, 26u)) * POP * cells * pop * pop + vec3<f32>(0.0, POP_UP * cells * (0.5 + rand(base, 28u)), 0.0);
       s.life = 1.2 + 2.8 * r * r;
       s.age = 0.0;
       sparks[i] = s;
@@ -114,7 +115,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let dir = unitVector(rand(base, 2u), rand(base, 3u));
     let speed = rand(base, 5u);
     s.pos = P.emitter + dir * P.radius * vec3<f32>(P.width, 1.0, P.width) * 0.8 * pow(rand(base, 4u), 1.0 / 3.0);
-    s.vel = dir * BURST_SPEED * (0.15 + 0.85 * speed * speed) + vec3<f32>(0.0, BURST_UP, 0.0);
+    s.vel = dir * BURST_SPEED * cells * (0.15 + 0.85 * speed * speed) + vec3<f32>(0.0, BURST_UP * cells, 0.0);
     s.life = 0.8 + 2.4 * rand(base, 6u);
     s.age = 0.0;
     sparks[i] = s;

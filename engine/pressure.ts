@@ -1,6 +1,5 @@
 import { bindResources } from './gpu';
 import { COARSEN, MASK, PROLONGATE, RESTRICT, SMOOTH } from './pressure-shaders';
-import { GRID } from './scene';
 
 const CYCLES = 2;
 const SWEEPS = 2;
@@ -13,9 +12,10 @@ export type PressureSolver = ReturnType<typeof createPressureSolver>;
 
 // Geometric multigrid for the pressure: V-cycles over halved grids with red-black Gauss-Seidel on each level.
 // The solver also owns the solid masks, one per level; the level-0 pressure persists as the next solve's starting guess.
-export function createPressureSolver(device: GPUDevice, params: GPUBuffer, divergence: GPUTexture) {
-  const sizes: number[][] = [[...GRID]];
-  while (Math.min(...sizes[sizes.length - 1]) > COARSEST) sizes.push(sizes[sizes.length - 1].map((n) => n / 2));
+export function createPressureSolver(device: GPUDevice, params: GPUBuffer, divergence: GPUTexture, grid: readonly number[]) {
+  const sizes: number[][] = [[...grid]];
+  const halvable = (size: number[]) => Math.min(...size) > COARSEST && size.every((n) => n % 2 === 0);
+  while (halvable(sizes[sizes.length - 1])) sizes.push(sizes[sizes.length - 1].map((n) => n / 2));
   const volume = (size: number[]) =>
     device.createTexture({ size, dimension: '3d', format: 'r32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
   const levels = sizes.map((size, l) => ({ size, pressure: volume(size), rhs: l === 0 ? divergence : volume(size), solid: volume(size) }));

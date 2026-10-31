@@ -1,13 +1,11 @@
 import { COMPOSITE, DISPLAY, RENDER, RESOLVE } from './render-shaders';
-import { BOX_MAX, BOX_MIN, DENSITY, EXPOSURE, FIRE_LIGHT, FLOW_PERIOD, GRID, type Preset } from './scene';
+import { BOX_MAX, BOX_MIN, DENSITY, EXPOSURE, FIRE_LIGHT, FLOW_PERIOD, GRID, type Preset, type Quality } from './scene';
 import type { Volumes } from './simulation';
 import { createSparkRenderer } from './sparks';
 
 const VIEW_FLOATS = 40;
 const TARGET_FORMAT: GPUTextureFormat = 'rgba16float';
-const LIVE_STEP_CELLS = 1.5;
-const LIVE_MAX_STEPS = 160;
-// The export marches twice as densely and sums its samples by blending, so N samples make an exact mean.
+// The export marches densely, in base cells, and sums its samples by blending, so N samples make an exact mean.
 export const EXPORT_STEP_CELLS = 0.75;
 const EXPORT_MAX_STEPS = 320;
 const ADD: GPUBlendComponent = { srcFactor: 'one', dstFactor: 'one', operation: 'add' };
@@ -68,7 +66,9 @@ export type ExportSample = {
 export type Renderer = ReturnType<typeof createRenderer>;
 export type ExportTargets = ReturnType<Renderer['createExportTargets']>;
 
-export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volumes: Volumes) {
+export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volumes: Volumes, initialQuality: Quality) {
+  // The live raymarch's step and step count; a quality change without a new grid only swaps these.
+  let live = { stepCells: initialQuality.stepCells, maxSteps: initialQuality.maxSteps };
   const pipeline = (module: GPUShaderModule, entryPoint: string, targets: GPUColorTargetState[]) =>
     device.createRenderPipeline({
       layout: 'auto',
@@ -81,6 +81,8 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   const raymarch = pipeline(renderModule, 'fs', [{ format: TARGET_FORMAT }]);
   const resolve = fullscreen(RESOLVE, TARGET_FORMAT);
   const composite = fullscreen(COMPOSITE, format);
+  // The same bilinear pass into a float target, to carry the history over to a new target size.
+  const resample = fullscreen(COMPOSITE, TARGET_FORMAT);
 
   const viewBuffer = device.createBuffer({ size: VIEW_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const blendBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -110,13 +112,18 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     return exportPipelines;
   }
 
-  let targets: { width: number; height: number; current: GPUTexture; history: GPUTexture[]; resolveGroups: GPUBindGroup[]; compositeGroups: GPUBindGroup[] } | null = null;
+  type Targets = { width: number; height: number; current: GPUTexture; history: GPUTexture[]; resolveGroups: GPUBindGroup[]; compositeGroups: GPUBindGroup[]; resampleGroups: GPUBindGroup[] };
+  let targets: Targets | null = null;
+  // Targets of the old size, destroyed once the frame that resampled them has been submitted.
+  let retired: Targets | null = null;
   let historyIndex = 0;
   let historyValid = false;
 
-  function ensureTargets(width: number, height: number) {
+  // Targets for this size. When the size changes, the resolved history is resampled into the new one so a quality
+  // change shows the same converged frame, not the raw jittered march.
+  function ensureTargets(encoder: GPUCommandEncoder, width: number, height: number) {
     if (targets && targets.width === width && targets.height === height) return targets;
-    disposeTargets();
+    const old = targets;
     const make = () =>
       device.createTexture({ size: [width, height], format: TARGET_FORMAT, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
     const current = make();
@@ -146,16 +153,41 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
           ],
         }),
       ),
+      resampleGroups: views.map((view) =>
+        device.createBindGroup({
+          layout: resample.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: view },
+            { binding: 1, resource: volumes.sampler },
+          ],
+        }),
+      ),
     };
-    historyValid = false;
+    if (old && historyValid) {
+      fullscreenPass(encoder, views[historyIndex], resample, old.resampleGroups[historyIndex]);
+      retireTargets(old);
+    } else {
+      if (old) retireTargets(old);
+      historyValid = false;
+    }
     return targets;
   }
 
+  function retireTargets(old: Targets) {
+    destroyTargets(retired);
+    retired = old;
+  }
+
+  function destroyTargets(which: Targets | null) {
+    if (!which) return;
+    which.current.destroy();
+    which.history.forEach((texture) => texture.destroy());
+  }
+
   function disposeTargets() {
-    if (!targets) return;
-    targets.current.destroy();
-    targets.history.forEach((texture) => texture.destroy());
-    targets = null;
+    destroyTargets(retired);
+    destroyTargets(targets);
+    retired = targets = null;
   }
 
   const viewData = new Float32Array(VIEW_FLOATS);
@@ -191,8 +223,11 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   };
 
   function draw(encoder: GPUCommandEncoder, canvasView: GPUTextureView, frame: Frame) {
-    const { current, history, resolveGroups, compositeGroups } = ensureTargets(frame.width, frame.height);
-    writeView({ ...frame, jitter: [0, 0], frame: frame.index, stepCells: LIVE_STEP_CELLS, maxSteps: LIVE_MAX_STEPS, sampleWeight: 1, frameTime: 0 });
+    // The previous frame's command buffer, which may have read the retired targets, has been submitted by now.
+    destroyTargets(retired);
+    retired = null;
+    const { current, history, resolveGroups, compositeGroups } = ensureTargets(encoder, frame.width, frame.height);
+    writeView({ ...frame, jitter: [0, 0], frame: frame.index, stepCells: live.stepCells, maxSteps: live.maxSteps, sampleWeight: 1, frameTime: 0 });
     device.queue.writeBuffer(blendBuffer, 0, new Float32Array([historyValid ? frame.blend : 1]));
     const next = 1 - historyIndex;
     fullscreenPass(encoder, current.createView(), raymarch, raymarchGroups[frame.scalarIndex], frame.timestamps.render);
@@ -277,6 +312,9 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     drawPreview,
     resetHistory: () => {
       historyValid = false;
+    },
+    setQuality(quality: Quality) {
+      live = { stepCells: quality.stepCells, maxSteps: quality.maxSteps };
     },
     dispose() {
       disposeTargets();

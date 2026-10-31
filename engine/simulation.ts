@@ -1,27 +1,11 @@
 import { bindResources } from './gpu';
 import { createNoiseTextures, type NoiseTextures } from './noise-textures';
 import { createPressureSolver } from './pressure';
-import {
-  type Box,
-  GRID,
-  LIGHT,
-  LIGHT_BLUR_PASSES,
-  LIGHT_GRID,
-  LIGHT_SCALE,
-  MAX_BOXES,
-  MODE_INDEX,
-  type Preset,
-  SHADOW_GRID,
-  type Tweaks,
-} from './scene';
+import { type Box, DENSITY, GRID, LIGHT, lightBlurDispatches, MAX_BOXES, MODE_INDEX, type Preset, type Quality, type Tweaks } from './scene';
 import { CLEAR, EMISSION, HEADER, LIGHT_BLUR, MIX, SHADERS } from './simulation-shaders';
 import { createSparkSimulation } from './sparks';
 
 const PARAM_FLOATS = 64;
-const FLOW_GRID = GRID.map((n) => n / 2) as [number, number, number];
-// The residual readback skips the sponge under the lid, where the open top is only approximate.
-const LIVE_HEIGHT = Math.floor(GRID[1] * 0.8);
-const ROW_BYTES = Math.ceil((GRID[0] * 4) / 256) * 256;
 // Index of the loop blend among the scalar and flow volumes; the solver never reads it, only lighting and rendering.
 export const LOOP_SOURCE = 2;
 
@@ -44,8 +28,19 @@ export type StepParams = { preset: Preset; tweaks: Tweaks; boxes: Box[]; time: n
 
 export type Simulation = ReturnType<typeof createSimulation>;
 
-export function createSimulation(device: GPUDevice) {
-  const volume = (format: GPUTextureFormat, size: readonly number[] = GRID, usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING) =>
+export function createSimulation(device: GPUDevice, quality: Quality) {
+  const grid = quality.grid;
+  // Cells per base-grid cell: preset values in cells are scaled by it, so a finer grid runs the same fire.
+  const k = grid[0] / GRID[0];
+  const half = (n: number) => Math.ceil(n / 2);
+  const flowGrid = grid.map(half) as [number, number, number];
+  const shadowGrid = flowGrid;
+  const lightGrid = grid.map((n) => Math.ceil(n / quality.lightScale)) as [number, number, number];
+  const blurDispatches = lightBlurDispatches(quality);
+  // The residual readback skips the sponge under the lid, where the open top is only approximate.
+  const liveHeight = Math.floor(grid[1] * 0.8);
+  const rowBytes = Math.ceil((grid[0] * 4) / 256) * 256;
+  const volume = (format: GPUTextureFormat, size: readonly number[] = grid, usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING) =>
     device.createTexture({ size: [...size], dimension: '3d', format, usage });
   const copyable = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC;
   // Velocity on the cell faces: the state, then within a step the advected field and the field with forces added.
@@ -55,13 +50,15 @@ export function createSimulation(device: GPUDevice) {
   // A spare volume: the MacCormack prediction, then the cell-centred forces.
   const scratch = volume('rgba16float');
   const states = [0, 1, LOOP_SOURCE];
-  const scalars = states.map(() => volume('rgba16float', GRID, copyable));
+  const scalars = states.map(() => volume('rgba16float', grid, copyable));
   // The displacement fields are smooth, so half the grid carries them at an eighth of the fetch footprint.
-  const flows: [GPUTexture, GPUTexture][] = states.map(() => [volume('rgba16float', FLOW_GRID, copyable), volume('rgba16float', FLOW_GRID, copyable)]);
+  const flows: [GPUTexture, GPUTexture][] = states.map(() => [volume('rgba16float', flowGrid, copyable), volume('rgba16float', flowGrid, copyable)]);
   const curl = volume('rgba16float');
-  const divergence = volume('r32float', GRID, GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC);
-  const shadow = volume('rgba16float', SHADOW_GRID);
-  const light = [volume('rgba16float', LIGHT_GRID), volume('rgba16float', LIGHT_GRID)];
+  const divergence = volume('r32float', grid, GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC);
+  const shadow = volume('rgba16float', shadowGrid);
+  const light = [volume('rgba16float', lightGrid), volume('rgba16float', lightGrid)];
+  // The smoke in each light cell, which the blur lets the flame's light through or not.
+  const thickness = volume('r32float', lightGrid);
   const sampler = device.createSampler({
     magFilter: 'linear',
     minFilter: 'linear',
@@ -74,8 +71,8 @@ export function createSimulation(device: GPUDevice) {
   // step's params, so each step slot has its own.
   const paramSlots = both(() => device.createBuffer({ size: PARAM_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
   const blend = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const staging = device.createBuffer({ size: ROW_BYTES * GRID[1] * GRID[2], usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-  const pressure = createPressureSolver(device, paramSlots[0], divergence);
+  const staging = device.createBuffer({ size: rowBytes * grid[1] * grid[2], usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const pressure = createPressureSolver(device, paramSlots[0], divergence, grid);
   const noise = createNoiseTextures(device);
   const sparks = createSparkSimulation(device, { paramSlots, velocity, scalars, sampler });
 
@@ -87,8 +84,11 @@ export function createSimulation(device: GPUDevice) {
   >;
   const clearHalf = compute(CLEAR('rgba16float'));
   const clearFloat = compute(CLEAR('r32float'));
-  const emission = compute(EMISSION(LIGHT_SCALE));
-  const lightBlur = [compute(LIGHT_BLUR, { dilate: 0 }), compute(LIGHT_BLUR, { dilate: 1 })];
+  const emission = compute(EMISSION(quality.lightScale));
+  // Light crossing a light cell of smoke is absorbed by this much per unit of smoke, half of a straight march's
+  // worth, since the blur stands in for scattering around as much as through.
+  const absorb = (0.5 * DENSITY * quality.lightScale) / grid[0];
+  const lightBlur = [compute(LIGHT_BLUR, { dilate: 0, absorb }), compute(LIGHT_BLUR, { dilate: 1, absorb })];
   const mix = compute(MIX);
 
   const bind = (pipeline: GPUComputePipeline, resources: (GPUBuffer | GPUTexture | GPUSampler)[]) => bindResources(device, pipeline, resources);
@@ -108,18 +108,18 @@ export function createSimulation(device: GPUDevice) {
   const residual = both((j) => bind(pipelines.divergence, [paramSlots[0], velocity, divergence, scalars[j], pressure.solid]));
   const lighting = {
     shadow: states.map((j) => bind(pipelines.shadow, [paramSlots[0], scalars[j], sampler, shadow])),
-    emission: states.map((j) => bind(emission, [scalars[j], light[0]])),
-    blur: lightBlur.map((pipeline) => both((k) => bind(pipeline, [light[k], light[1 - k]]))),
+    emission: states.map((j) => bind(emission, [scalars[j], light[0], thickness])),
+    blur: lightBlur.map((pipeline) => both((i) => bind(pipeline, [light[i], light[1 - i], thickness]))),
   };
   const clearGroups = [
     ...[velocity, ...scalars, ...flows.flat()].map((t) => [clearHalf, bind(clearHalf, [t])] as const),
     [clearFloat, bind(clearFloat, [pressure.texture])] as const,
   ];
 
-  const workgroups = GRID.map((n) => Math.ceil(n / 4)) as [number, number, number];
-  const flowWorkgroups = FLOW_GRID.map((n) => Math.ceil(n / 4)) as [number, number, number];
-  const shadowWorkgroups = SHADOW_GRID.map((n) => Math.ceil(n / 4)) as [number, number, number];
-  const lightWorkgroups = LIGHT_GRID.map((n) => Math.ceil(n / 4)) as [number, number, number];
+  const workgroups = grid.map((n) => Math.ceil(n / 4)) as [number, number, number];
+  const flowWorkgroups = flowGrid.map((n) => Math.ceil(n / 4)) as [number, number, number];
+  const shadowWorkgroups = shadowGrid.map((n) => Math.ceil(n / 4)) as [number, number, number];
+  const lightWorkgroups = lightGrid.map((n) => Math.ceil(n / 4)) as [number, number, number];
   const run = (pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, group: GPUBindGroup, size = workgroups) => {
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, group);
@@ -130,19 +130,22 @@ export function createSimulation(device: GPUDevice) {
   let sc = 0;
   const paramData = new Float32Array(PARAM_FLOATS);
 
+  // Positions, sizes, speeds and accelerations given in base cells become this grid's cells; rates per second,
+  // per-cell concentrations and the blast's divergence are the same on any grid.
   function writeParams(slot: number, { preset, tweaks, boxes, time, dt, emitting, blast }: StepParams) {
     const boxData = Array.from({ length: MAX_BOXES }, (_, i) => {
       const box = boxes[i];
-      return box ? [box.x, box.y, box.z, box.yaw, box.hx, box.hy, box.hz, 1] : [0, 0, 0, 0, 0, 0, 0, 0];
+      return box ? [box.x * k, box.y * k, box.z * k, box.yaw, box.hx * k, box.hy * k, box.hz * k, 1] : [0, 0, 0, 0, 0, 0, 0, 0];
     }).flat();
+    const wind = tweaks.wind * k;
     paramData.set([
-      ...GRID, dt,
-      time, preset.buoyancy * tweaks.heat, preset.cooling, tweaks.vorticity,
-      tweaks.wind * Math.cos((tweaks.windYaw * Math.PI) / 180), 0, tweaks.wind * Math.sin((tweaks.windYaw * Math.PI) / 180), preset.burn,
-      ...preset.emitter, preset.radius,
+      ...grid, dt,
+      time, preset.buoyancy * tweaks.heat * k, preset.cooling, tweaks.vorticity * k,
+      wind * Math.cos((tweaks.windYaw * Math.PI) / 180), 0, wind * Math.sin((tweaks.windYaw * Math.PI) / 180), preset.burn,
+      ...preset.emitter.map((c) => c * k), preset.radius * k,
       emitting ? preset.emit : 0, preset.smokeYield * tweaks.smoke, preset.heat * tweaks.heat, preset.dissipation,
       ...LIGHT, MODE_INDEX[preset.mode],
-      preset.turbulence, preset.damping, preset.expansion, blast,
+      preset.turbulence * k, preset.damping, preset.expansion, blast,
       preset.ignite, tweaks.seed, tweaks.width, 0,
       ...boxData,
     ]);
@@ -169,12 +172,13 @@ export function createSimulation(device: GPUDevice) {
     sparks.step(pass, slot, sc);
   }
 
-  // The shadow volume and the flame's light volume, both read by the render; the blur ping-pongs and ends in light[0].
-  // The first two blurs also dilate the occupancy by two coarse cells, the margin the raymarch's empty-space skip needs.
+  // The shadow volume and the flame's light volume, both read by the render; the blur ping-pongs an even number
+  // of times and ends in light[0]. The first two blurs also dilate the occupancy by two coarse cells, the margin
+  // the raymarch's empty-space skip needs.
   function updateLighting(pass: GPUComputePassEncoder, source = sc) {
     run(pass, pipelines.shadow, lighting.shadow[source], shadowWorkgroups);
     run(pass, emission, lighting.emission[source], lightWorkgroups);
-    for (let i = 0; i < LIGHT_BLUR_PASSES * 2; i++) {
+    for (let i = 0; i < blurDispatches; i++) {
       const dilate = i < 2 ? 1 : 0;
       run(pass, lightBlur[dilate], lighting.blur[dilate][i % 2], lightWorkgroups);
     }
@@ -186,10 +190,10 @@ export function createSimulation(device: GPUDevice) {
     device.createTexture({ size: [...size], dimension: '3d', format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
 
   function keepFrame(i: number) {
-    kept[i] ??= { scalars: keepable(GRID), flows: [keepable(FLOW_GRID), keepable(FLOW_GRID)] };
+    kept[i] ??= { scalars: keepable(grid), flows: [keepable(flowGrid), keepable(flowGrid)] };
     const encoder = device.createCommandEncoder();
-    encoder.copyTextureToTexture({ texture: scalars[sc] }, { texture: kept[i].scalars }, [...GRID]);
-    flows[sc].forEach((flow, k) => encoder.copyTextureToTexture({ texture: flow }, { texture: kept[i].flows[k] }, [...FLOW_GRID]));
+    encoder.copyTextureToTexture({ texture: scalars[sc] }, { texture: kept[i].scalars }, [...grid]);
+    flows[sc].forEach((flow, f) => encoder.copyTextureToTexture({ texture: flow }, { texture: kept[i].flows[f] }, [...flowGrid]));
     device.queue.submit([encoder.finish()]);
   }
 
@@ -200,7 +204,7 @@ export function createSimulation(device: GPUDevice) {
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     run(pass, mix, bind(mix, [blend, scalars[sc], kept[i].scalars, scalars[LOOP_SOURCE]]));
-    flows[sc].forEach((flow, k) => run(pass, mix, bind(mix, [blend, flow, kept[i].flows[k], flows[LOOP_SOURCE][k]]), flowWorkgroups));
+    flows[sc].forEach((flow, f) => run(pass, mix, bind(mix, [blend, flow, kept[i].flows[f], flows[LOOP_SOURCE][f]]), flowWorkgroups));
     pass.end();
     device.queue.submit([encoder.finish()]);
   }
@@ -219,16 +223,16 @@ export function createSimulation(device: GPUDevice) {
     const pass = encoder.beginComputePass();
     run(pass, pipelines.divergence, residual[1 - sc]);
     pass.end();
-    encoder.copyTextureToBuffer({ texture: divergence }, { buffer: staging, bytesPerRow: ROW_BYTES, rowsPerImage: GRID[1] }, [...GRID]);
+    encoder.copyTextureToBuffer({ texture: divergence }, { buffer: staging, bytesPerRow: rowBytes, rowsPerImage: grid[1] }, [...grid]);
     device.queue.submit([encoder.finish()]);
     return staging.mapAsync(GPUMapMode.READ).then(() => {
       const values = new Float32Array(staging.getMappedRange());
-      const stride = ROW_BYTES / 4;
+      const stride = rowBytes / 4;
       let worst = 0;
-      for (let z = 0; z < GRID[2]; z++) {
-        for (let y = 0; y < LIVE_HEIGHT; y++) {
-          const row = (z * GRID[1] + y) * stride;
-          for (let x = 0; x < GRID[0]; x++) worst = Math.max(worst, Math.abs(values[row + x]));
+      for (let z = 0; z < grid[2]; z++) {
+        for (let y = 0; y < liveHeight; y++) {
+          const row = (z * grid[1] + y) * stride;
+          for (let x = 0; x < grid[0]; x++) worst = Math.max(worst, Math.abs(values[row + x]));
         }
       }
       staging.unmap();
@@ -248,7 +252,7 @@ export function createSimulation(device: GPUDevice) {
 
   function dispose() {
     releaseKept();
-    for (const texture of [velocity, advected, forced, scratch, ...scalars, ...flows.flat(), curl, divergence, shadow, ...light]) texture.destroy();
+    for (const texture of [velocity, advected, forced, scratch, ...scalars, ...flows.flat(), curl, divergence, shadow, ...light, thickness]) texture.destroy();
     noise.values.destroy();
     noise.curl.destroy();
     pressure.dispose();
@@ -257,5 +261,5 @@ export function createSimulation(device: GPUDevice) {
   }
 
   const volumes: Volumes = { scalars, flows, velocity, shadow, light: light[0], params: paramSlots[0], sampler, noise, sparks: sparks.buffer };
-  return { volumes, writeParams, step, updateLighting, keepFrame, blendLoop, releaseKept, readResidual, clear, dispose, get scalarIndex() { return sc; } };
+  return { grid, volumes, writeParams, step, updateLighting, keepFrame, blendLoop, releaseKept, readResidual, clear, dispose, get scalarIndex() { return sc; } };
 }

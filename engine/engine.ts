@@ -3,7 +3,7 @@ import { requestGpu } from './gpu';
 import { GpuTimer } from './gpu-timer';
 import { type OfflineJob, type RenderedFrame, renderOffline } from './offline-render';
 import { cameraBasis, createRenderer, type Vec3 } from './render';
-import { BLAST_DECAY, type Box, BURST_EVERY, DT, GRID, MAX_BOXES, type Preset, type Tweaks } from './scene';
+import { BLAST_DECAY, type Box, BURST_EVERY, DT, MAX_BOXES, type Preset, QUALITIES, type Quality, type Tweaks } from './scene';
 import { createSimulation } from './simulation';
 
 const FOV = (35 * Math.PI) / 180;
@@ -11,16 +11,20 @@ const ORBIT_DISTANCE = 3;
 const MAX_PIXEL_RATIO = 2;
 const TAA_BLEND = 0.2;
 const TAA_BLEND_MOVING = 0.5;
-// The raymarch resolution relative to the canvas: it steps down while frames drop and back up once they have held.
-const SCALE_MIN = 0.375;
-const SCALE_MAX = 1;
+// The raymarch resolution relative to the canvas, within the quality's bounds: it steps down while frames fall
+// short of the target rate and back up once they have held; a step up that fails waits twice as long next time.
 const SCALE_STEP = 0.125;
-const SCALE_HOLD_MS = 4000;
+const SCALE_HOLD_MS = 3000;
+const SCALE_HOLD_MAX_MS = 48000;
+// While the camera moves the march runs this much lower in scale; the frame is softer and smooth, then sharpens.
+const ORBIT_SCALE_DROP = 0.25;
 
 export type EngineStats = {
   fps: number;
   displayHz: number;
   renderScale: number;
+  renderWidth: number;
+  renderHeight: number;
   gpuMs: number;
   simulationMs: number;
   lightingMs: number;
@@ -37,13 +41,14 @@ export type EngineStats = {
 
 export type Engine = Awaited<ReturnType<typeof createEngine>>;
 
-export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Preset) {
+export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Preset, initialQuality: Quality = QUALITIES.balanced) {
   const { device, format, adapterName, hasTimestamps } = await requestGpu();
   const context = canvas.getContext('webgpu')!;
   context.configure({ device, format, alphaMode: 'premultiplied' });
 
-  const simulation = createSimulation(device);
-  const renderer = createRenderer(device, format, simulation.volumes);
+  let quality = initialQuality;
+  let simulation = createSimulation(device, quality);
+  let renderer = createRenderer(device, format, simulation.volumes, quality);
   const timer = new GpuTimer(device, hasTimestamps);
 
   let preset = initialPreset;
@@ -83,23 +88,49 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   let stepsPerSecond = 0;
   let residual = 0;
   let frameIndex = 0;
-  let renderScale = 0.5;
+  let renderScale = quality.scaleMax;
+  let liveWidth = 1;
+  let liveHeight = 1;
   let scaleHoldUntil = 0;
+  let scaleHoldMs = SCALE_HOLD_MS;
+  let lastRiseAt = -Infinity;
   let displayHz = 60;
   const frameGaps: number[] = [];
+  let pendingQuality: Quality | null = null;
 
-  // Frames are dropping when rAF runs clearly below the display rate, which the shortest gaps reveal.
+  // The display rate comes from the shortest frame gaps. The target is the lower of it and the quality's rate: a
+  // sharp 60 on a 120 Hz screen is worth more than a blurred 110.
   function adjustQuality(now: number) {
     frameGaps.sort((a, b) => a - b);
     displayHz = Math.min(360, 1000 / frameGaps[Math.floor(frameGaps.length * 0.1)]);
     frameGaps.length = 0;
-    const dropping = fps < displayHz * 0.92;
-    if (dropping && renderScale > SCALE_MIN) {
-      renderScale -= SCALE_STEP;
-      scaleHoldUntil = now + SCALE_HOLD_MS;
-    } else if (!dropping && now > scaleHoldUntil && renderScale < SCALE_MAX) {
-      renderScale += SCALE_STEP;
+    const target = Math.min(displayHz, quality.targetFps);
+    if (fps < target * 0.9 && renderScale > quality.scaleMin) {
+      renderScale = Math.max(quality.scaleMin, renderScale - SCALE_STEP);
+      scaleHoldMs = now - lastRiseAt < 3000 ? Math.min(scaleHoldMs * 2, SCALE_HOLD_MAX_MS) : SCALE_HOLD_MS;
+      scaleHoldUntil = now + scaleHoldMs;
+    } else if (fps >= target * 0.97 && now > scaleHoldUntil && renderScale < quality.scaleMax) {
+      renderScale = Math.min(quality.scaleMax, renderScale + SCALE_STEP);
+      lastRiseAt = now;
     }
+  }
+
+  // A new grid or light volume means a new simulation, which starts the fire over; anything else is a render setting.
+  function applyQuality(next: Quality) {
+    const rebuild = next.grid.join() !== quality.grid.join() || next.lightScale !== quality.lightScale;
+    quality = next;
+    if (rebuild) {
+      renderer.dispose();
+      simulation.dispose();
+      simulation = createSimulation(device, quality);
+      renderer = createRenderer(device, format, simulation.volumes, quality);
+      simulation.clear();
+      startBurst();
+    } else {
+      renderer.setQuality(quality);
+    }
+    renderScale = Math.min(quality.scaleMax, Math.max(quality.scaleMin, renderScale));
+    scaleHoldUntil = 0;
   }
 
   // Sound plays only while the live loop runs; it fades out before the context stops so pausing never clicks.
@@ -138,6 +169,10 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       looping = false;
       return;
     }
+    if (pendingQuality) {
+      applyQuality(pendingQuality);
+      pendingQuality = null;
+    }
     const gap = now - lastFrame;
     accumulator = Math.min(accumulator + gap / 1000, 4 * DT);
     lastFrame = now;
@@ -161,6 +196,11 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     simulation.updateLighting(lightingPass);
     lightingPass.end();
 
+    // The lighter march lasts only while the orbit still visibly moves; the blend keeps easing until it fully stops.
+    const moving = Boolean(drag) || Math.abs(spinAzimuth) + Math.abs(spinPolar) > 2e-3;
+    const scale = moving ? Math.max(quality.scaleMin, renderScale - ORBIT_SCALE_DROP) : renderScale;
+    liveWidth = Math.max(1, Math.round(canvas.width * scale));
+    liveHeight = Math.max(1, Math.round(canvas.height * scale));
     renderer.draw(encoder, context.getCurrentTexture().createView(), {
       camera: { eye: eye(), target, tanHalfFov: Math.tan(FOV / 2) },
       preset,
@@ -168,8 +208,8 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       time: simTime,
       index: frameIndex++,
       scalarIndex: simulation.scalarIndex,
-      width: Math.max(1, Math.round(canvas.width * renderScale)),
-      height: Math.max(1, Math.round(canvas.height * renderScale)),
+      width: liveWidth,
+      height: liveHeight,
       blend: drag || spinning ? TAA_BLEND_MOVING : TAA_BLEND,
       timestamps: { render: timer.timestamps('render'), taa: timer.timestamps('taa'), composite: timer.timestamps('composite') },
     });
@@ -274,6 +314,11 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       boxes = [...boxes, box].slice(-MAX_BOXES);
       sound?.scene(preset, tweaks, boxes);
     },
+    // Takes effect at the next frame, or at once while the loop is idle; an export keeps the quality it started with.
+    setQuality(next: Quality) {
+      if (looping || exporting) pendingQuality = next;
+      else applyQuality(next);
+    },
     // Called inside the click: browsers only start an AudioContext during a user gesture.
     setSound(on: boolean) {
       soundOn = on;
@@ -349,6 +394,8 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
         fps,
         displayHz,
         renderScale,
+        renderWidth: liveWidth,
+        renderHeight: liveHeight,
         gpuMs: times.frame ?? 0,
         simulationMs: times.simulation ?? 0,
         lightingMs: times.lighting ?? 0,
@@ -357,7 +404,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
         compositeMs: times.composite ?? 0,
         stepsPerSecond,
         residual,
-        grid: GRID,
+        grid: simulation.grid,
         adapterName,
         hasTimestamps,
         sound: !soundOn || !audio || !sound ? 'off' : audio.state === 'running' ? sound.level() : audio.state,

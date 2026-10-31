@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { Engine } from '@/engine/engine';
-import type { Tweaks } from '@/engine/scene';
+import { QUALITIES, type QualityId, type Tweaks } from '@/engine/scene';
 import { presetById, PRESETS } from '@/presets/presets';
 
 export type GpuStatus = 'loading' | 'ready' | 'unsupported' | 'error';
@@ -12,9 +12,11 @@ type StudioState = {
   presetId: string;
   tweaks: Tweaks;
   backdrop: Backdrop;
+  quality: QualityId;
   exporting: boolean;
   sound: boolean;
   setEngine: (engine: Engine | null, status: GpuStatus) => void;
+  setQuality: (quality: QualityId) => void;
   setPreset: (presetId: string) => void;
   setTweak: (key: keyof Tweaks, value: number) => void;
   addCube: () => void;
@@ -29,9 +31,17 @@ export const useStudioStore = create<StudioState>()((set, get) => ({
   presetId: PRESETS[0].id,
   tweaks: { heat: 1, vorticity: PRESETS[0].vorticity, wind: 0, windYaw: 0, seed: 0, blue: PRESETS[0].blue, sparks: PRESETS[0].sparks, smoke: 1, width: 1 },
   backdrop: 'checker',
+  quality: 'balanced',
   exporting: false,
   sound: false,
-  setEngine: (engine, status) => set({ engine, status, sound: false }),
+  setEngine: (engine, status) => {
+    engine?.setQuality(QUALITIES[get().quality]);
+    set({ engine, status, sound: false });
+  },
+  setQuality: (quality) => {
+    get().engine?.setQuality(QUALITIES[quality]);
+    set({ quality });
+  },
   setPreset: (presetId) => {
     const preset = presetById(presetId);
     get().engine?.setPreset(preset);
