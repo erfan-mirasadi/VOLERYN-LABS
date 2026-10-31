@@ -11,9 +11,14 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 }`;
 
 // The ACES fit, then the sRGB transfer curve, so a frame saved as sRGB decodes to what the viewport shows.
+// Fitting each channel on its own bleaches a hot flame to white; fitting the brightest channel and scaling the
+// colour down to it keeps the hue. Mostly the first with some of the second: the core still brightens towards
+// white where it is hottest, but keeps its yellow and the detail in it on the way there.
 export const TONEMAP = /* wgsl */ `
+fn aces(c: vec3<f32>) -> vec3<f32> { return clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0)); }
 fn tonemap(c: vec3<f32>) -> vec3<f32> {
-  let m = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0));
+  let peak = max(max(c.r, c.g), max(c.b, 1e-4));
+  let m = mix(aces(c), c / peak * aces(vec3<f32>(peak)).x, 0.3);
   return select(1.055 * pow(m, vec3<f32>(1.0 / 2.4)) - 0.055, 12.92 * m, m <= vec3<f32>(0.0031308));
 }`;
 
@@ -25,7 +30,7 @@ const GROUND_COLOR = ${vec3(GROUND_COLOR)};
 const NOISE_PERIOD = ${NOISE_PERIOD.toFixed(1)};
 const BLUE_FLAME = vec3<f32>(0.5, 1.4, 4.5);
 // Emission per unit of extinction: the flame is thin enough to see through, so its light is turned up.
-const FLAME_GAIN = 2.0;
+const FLAME_GAIN = 2.2;
 const ALBEDO = vec3<f32>(0.03, 0.025, 0.02);
 struct View {
   camPos: vec3<f32>,
@@ -159,38 +164,46 @@ fn march(frag: vec2<f32>) -> March {
         break;
       }
     }
-    // Blocks holding gas thinner than 0.02 count as empty and are crossed 4.5 cells at a time, inside the
-    // occupancy's dilated 8-cell margin and short of any solid the SDF reports.
+    // Blocks holding gas thinner than 0.02 count as empty and are crossed almost two blocks at a time, inside the
+    // occupancy's two-block dilated margin and short of any solid the SDF reports.
     let blocks = vec3<i32>(textureDimensions(glow));
-    if (textureLoad(glow, min(vec3<i32>(q * vec3<f32>(blocks)), blocks - 1), 0).a < 0.02 && sd > 4.5) {
-      t += 4.5 / P.size.x;
+    let skip = 2.0 * P.size.x / f32(blocks.x) - 0.5;
+    if (textureLoad(glow, min(vec3<i32>(q * vec3<f32>(blocks)), blocks - 1), 0).a < 0.02 && sd > skip) {
+      t += skip / P.size.x;
       continue;
     }
     let lightHere = textureSampleLevel(glow, lin, q, 0.0);
     var s = textureSampleLevel(sca, lin, q, 0.0);
     var breakup = 1.0;
+    var coreTexture = 1.0;
     if (V.detail > 0.0 && s.y > 0.2) {
       // Sub-cell tongues: noise looked up where the gas came from, so it travels with the flow. The two fields are
       // blended by value, never by coordinate: a coordinate blend alternates between a frozen pattern and one moving
       // at twice the gas speed. The lookup is stretched upwards so the tongues streak with the rise instead of
-      // mottling, and the hot core keeps its own shape.
+      // mottling, and everything is measured in base cells so the noise keeps its size on a finer grid.
+      let k = cellScale();
+      let gb = g / k;
+      let dA = textureSampleLevel(flowA, lin, q, 0.0).xyz / k;
+      let dB = textureSampleLevel(flowB, lin, q, 0.0).xyz / k;
       let stretch = vec3<f32>(1.0, 0.5, 1.0) / NOISE_PERIOD;
-      let nA = textureSampleLevel(noise, rep, (g + textureSampleLevel(flowA, lin, q, 0.0).xyz) * stretch, 0.0);
-      let nB = textureSampleLevel(noise, rep, (g + textureSampleLevel(flowB, lin, q, 0.0).xyz) * stretch, 0.0);
-      let n = mix(nB, nA, V.flowWeight) - vec4<f32>(0.5);
-      // A finer octave on the same fields tears the tongues into wisps.
-      let fA = textureSampleLevel(noise, rep, (g + textureSampleLevel(flowA, lin, q, 0.0).xyz) * stretch * 2.7 + vec3<f32>(0.37), 0.0);
-      let fB = textureSampleLevel(noise, rep, (g + textureSampleLevel(flowB, lin, q, 0.0).xyz) * stretch * 2.7 + vec3<f32>(0.37), 0.0);
-      let f = mix(fB, fA, V.flowWeight) - vec4<f32>(0.5);
+      let n = mix(textureSampleLevel(noise, rep, (gb + dB) * stretch, 0.0), textureSampleLevel(noise, rep, (gb + dA) * stretch, 0.0), V.flowWeight) - vec4<f32>(0.5);
+      // A finer octave on the same fields tears the tongues into wisps, and a third, finer still, frays the edge.
+      let f = mix(textureSampleLevel(noise, rep, (gb + dB) * stretch * 2.7 + vec3<f32>(0.37), 0.0), textureSampleLevel(noise, rep, (gb + dA) * stretch * 2.7 + vec3<f32>(0.37), 0.0), V.flowWeight) - vec4<f32>(0.5);
+      let w = mix(textureSampleLevel(noise, rep, (gb + dB) * stretch * 4.2 + vec3<f32>(0.71), 0.0), textureSampleLevel(noise, rep, (gb + dA) * stretch * 4.2 + vec3<f32>(0.71), 0.0), V.flowWeight) - vec4<f32>(0.5);
+      let edge = 1.0 - smoothstep(0.5, 1.2, s.y);
       let gate = smoothstep(0.15, 0.6, s.y) * (1.0 - 0.5 * smoothstep(1.2, 2.5, s.y));
-      s = textureSampleLevel(sca, lin, q + (n.xyz * 2.0 + f.xyz * 0.8) * V.detail * gate / P.size, 0.0);
-      breakup = 1.0 + (1.2 * n.w + 0.9 * f.w) * gate;
+      s = textureSampleLevel(sca, lin, q + (n.xyz * 1.6 + f.xyz * 0.9 + w.xyz * 0.3 * edge) * V.detail * gate / (P.size / k), 0.0);
+      // Strands: the flame thins out where the noise dips and bunches where it peaks, so tongues separate with
+      // gaps between them; the core keeps a floor so it never hollows out, and carries the fine noise as brightness.
+      let ridge = 1.2 * n.w + 0.9 * f.w + 0.5 * w.w * edge;
+      breakup = mix(1.0, 0.1 + 1.9 * smoothstep(-0.45, 0.5, ridge), gate);
+      coreTexture = 1.0 + 0.4 * f.w * smoothstep(0.8, 1.8, s.y);
     }
     // Where fuel is burning right now the flame is hottest and whitest; the burnt gas around it is dimmer and more
     // orange. Fuel burns lean and blue where it enters, along the floor of the emitter or the skin of a solid, and
     // that layer glows blue through almost no soot; above it the soot takes over and the flame goes yellow.
     let reaction = smoothstep(1.0, 10.0, s.w);
-    let fresh = select(1.0 - smoothstep(0.0, 0.4 * P.radius, g.y - max(P.emitter.y - P.radius, 0.0)), 1.0 - smoothstep(1.0, 2.5, sd), P.mode == 3.0);
+    let fresh = select(1.0 - smoothstep(0.0, 0.4 * P.radius, g.y - max(P.emitter.y - P.radius, 0.0)), 1.0 - smoothstep(1.0, 2.5, sd / cellScale()), P.mode == 3.0);
     let lean = min(2.0 * V.blue, 1.0) * reaction * fresh;
     let light = textureSampleLevel(shade, lin, q, 0.0);
     let flameLight = lightHere.rgb * V.fireLight * V.fire;
@@ -199,7 +212,7 @@ fn march(frag: vec2<f32>) -> March {
     let sigma = sigmaSmoke + sigmaFire;
     let opacity = 1.0 - exp(-sigma * V.stepSize);
     let reach = transmittance * opacity / max(sigma, 1e-4);
-    m.fire += reach * sigmaFire * blackbody(s.y + 0.5 * reaction) * (0.7 + 0.5 * reaction) * FLAME_GAIN * V.fire;
+    m.fire += reach * sigmaFire * blackbody(s.y + 0.5 * reaction) * (0.7 + 0.5 * reaction) * coreTexture * FLAME_GAIN * V.fire;
     m.fire += transmittance * V.stepSize * lean * BLUE_FLAME * V.fire;
     // Wrenninge octaves: each softer and weaker, standing in for light scattered more than once; the weights sum to
     // one so an unshadowed cell gets exactly the key.

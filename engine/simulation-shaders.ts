@@ -49,6 +49,8 @@ fn solidDistance(p: vec3<f32>) -> f32 {
   return d;
 }
 fn isSolid(p: vec3<f32>) -> bool { return P.mode == 3.0 && solidDistance(p) < 0.0; }
+// Cells per base-grid cell: lengths, speeds and noise periods written in base cells are scaled by it.
+fn cellScale() -> f32 { return P.size.x / 64.0; }
 `;
 
 export const HEADER = PARAMS_STRUCT + /* wgsl */ `
@@ -198,18 +200,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   // Cool, slow burning makes more soot than a hot flame.
   let soot = burned * P.smokeYield * (1.0 + 3.0 * (1.0 - clamp(q.y, 0.0, 1.0)));
   q.x = (q.x + soot) * exp(-P.dissipation * P.dt);
-  let flicker = noise3(p * 0.3 + vec3<f32>(0.0, -P.time * 4.0, P.time * 1.3) + seedShift());
+  let k = cellScale();
+  let flicker = noise3(p * 0.3 / k + vec3<f32>(0.0, -P.time * 4.0, P.time * 1.3) + seedShift());
   if (P.mode == 3.0) {
     // Solids give off fuel from a thin skin around them, so the flames take their shape.
     let sd = solidDistance(p);
     if (sd < 0.0) {
       q = vec4<f32>(0.0);
-    } else if (sd < 2.5) {
+    } else if (sd < 2.5 * k) {
       // Upper faces burn, undersides smoulder, and hot spots wander slowly along the log.
-      let up = solidDistance(p + vec3<f32>(0.0, 0.75, 0.0)) - solidDistance(p - vec3<f32>(0.0, 0.75, 0.0));
-      let spot = noise3(p * 0.5 + vec3<f32>(0.0, P.time * 0.3, 0.0));
+      let up = solidDistance(p + vec3<f32>(0.0, 0.75 * k, 0.0)) - solidDistance(p - vec3<f32>(0.0, 0.75 * k, 0.0));
+      let spot = noise3(p * 0.5 / k + vec3<f32>(0.0, P.time * 0.3, 0.0));
       let skin = (0.25 + 0.75 * smoothstep(-0.5, 1.0, up)) * (0.4 + 0.6 * spot);
-      let amount = (1.0 - sd / 2.5) * (0.35 + 1.3 * flicker) * P.emit * P.dt * skin;
+      let amount = (1.0 - sd / (2.5 * k)) * (0.35 + 1.3 * flicker) * P.emit * P.dt * skin;
       q.z += amount;
       q.y += amount * 0.25;
     }
@@ -218,7 +221,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (d < 1.0) {
       var amount = (1.0 - d * d) * (0.35 + 1.3 * flicker) * P.emit * P.dt;
       // An explosion needs a lumpy charge; an even ball of fuel burns into a perfect sphere.
-      if (P.mode == 2.0) { amount *= 2.0 * flicker * flicker * (0.3 + 1.4 * noise3(p * 0.15 + vec3<f32>(0.0, 0.1 * P.time, 0.0))); }
+      if (P.mode == 2.0) { amount *= 2.0 * flicker * flicker * (0.3 + 1.4 * noise3(p * 0.15 / k + vec3<f32>(0.0, 0.1 * P.time, 0.0))); }
       if (P.mode == 1.0) {
         q.x += amount * 0.8;
         q.y += amount * 0.5;
@@ -292,8 +295,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
   if (!inside(c)) { return; }
   let p = vec3<f32>(c);
+  let k = cellScale();
   let s = textureLoad(sca, c, 0);
-  var v = vec3<f32>(0.0, P.dt * (P.buoyancy * s.y - 4.0 * s.x), 0.0);
+  var v = vec3<f32>(0.0, P.dt * (P.buoyancy * s.y - 4.0 * k * s.x), 0.0);
   // Vorticity confinement: push along N x omega to give back the swirls the coarse grid smooths away.
   let grad = 0.5 * vec3<f32>(spin(c + X) - spin(c - X), spin(c + Y) - spin(c - Y), spin(c + Z) - spin(c - Z));
   let len = length(grad);
@@ -302,12 +306,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   }
   v += P.dt * P.wind * (p.y / P.size.y);
   // Rising curl noise stirs the hot gas and the reaction sheet; being divergence-free it survives the projection.
-  let rise = vec3<f32>(0.0, -12.0 * P.time, 0.0) + seedShift();
-  let stirring = textureSampleLevel(stir, rep, (p + rise) / 24.0, 0.0).xyz;
-  v += P.dt * P.turbulence * stirring * clamp(s.y + 0.3 * s.x + 0.05 * s.w, 0.0, 1.5);
+  // A second octave, a third the size and rising faster, lives where the gas is hot and fuel is burning: the small
+  // movement that keeps a flame's tongues alive without shaking the whole plume.
+  let rise = vec3<f32>(0.0, -12.0 * k * P.time, 0.0) + seedShift();
+  let stirring = textureSampleLevel(stir, rep, (p + rise) / (24.0 * k), 0.0).xyz;
+  let rise2 = vec3<f32>(0.0, -27.0 * k * P.time, 0.0) + 2.0 * seedShift();
+  let fine = textureSampleLevel(stir, rep, (p + rise2) / (9.0 * k), 0.0).xyz;
+  v += P.dt * P.turbulence * (stirring * clamp(s.y + 0.3 * s.x + 0.05 * s.w, 0.0, 1.5) + 0.5 * fine * clamp(0.6 * s.y + 0.12 * s.w, 0.0, 1.2));
   let d = length((p - P.emitter) / (P.radius * vec3<f32>(P.width, 1.0, P.width)));
   if (d < 1.0) {
-    v.y += P.dt * P.emit * 0.8 * (1.0 - d);
+    v.y += P.dt * P.emit * 0.8 * k * (1.0 - d);
   }
   textureStore(dst, c, vec4<f32>(v, 0.0));
 }`,
@@ -354,7 +362,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   // none, so the push goes through the projection instead of being stripped by it. The blast is uneven, so the
   // fireball breaks into lobes instead of staying a ball.
   let d = length((vec3<f32>(c) - P.emitter) / (P.radius * vec3<f32>(P.width, 1.0, P.width)));
-  let lumps = 0.2 + 1.6 * noise3(vec3<f32>(c) * 0.12 + vec3<f32>(0.0, 0.0, 0.1 * P.time));
+  let lumps = 0.2 + 1.6 * noise3(vec3<f32>(c) * 0.12 / cellScale() + vec3<f32>(0.0, 0.0, 0.1 * P.time));
   let expansion = P.expansion * textureLoad(sca, c, 0).w + P.blast * max(1.0 - d * d, 0.0) * lumps;
   textureStore(dst, c, vec4<f32>(div - expansion, 0.0, 0.0, 0.0));
 }`,
@@ -417,34 +425,43 @@ fn flame(t: f32) -> f32 { return smoothstep(0.15, 0.6, t); }
 `;
 
 // The flame's light, averaged over each block of fine cells into the coarse light volume; its alpha holds the block's
-// occupancy (the most smoke or heat in it) so the raymarch can skip empty space.
+// occupancy (the most smoke or heat in it) so the raymarch can skip empty space. The block's mean smoke goes to a
+// second volume, which the blur reads to let the light through thin smoke and hold it back in thick.
 export const EMISSION = (scale: number) => BLACKBODY + /* wgsl */ `
 @group(0) @binding(0) var sca: texture_3d<f32>;
 @group(0) @binding(1) var dst: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(2) var thick: texture_storage_3d<r32float, write>;
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (any(id >= textureDimensions(dst))) { return; }
   let base = vec3<i32>(id) * ${scale};
   var sum = vec3<f32>(0.0);
+  var smoke = 0.0;
   var occupancy = 0.0;
   for (var z = 0; z < ${scale}; z++) {
     for (var y = 0; y < ${scale}; y++) {
       for (var x = 0; x < ${scale}; x++) {
         let s = textureLoad(sca, base + vec3<i32>(x, y, z), 0);
         sum += blackbody(s.y) * flame(s.y);
+        smoke += s.x;
         occupancy = max(occupancy, max(s.x, s.y));
       }
     }
   }
-  textureStore(dst, vec3<i32>(id), vec4<f32>(sum / ${(scale * scale * scale).toFixed(1)}, occupancy));
+  let cells = ${(scale * scale * scale).toFixed(1)};
+  textureStore(dst, vec3<i32>(id), vec4<f32>(sum / cells, occupancy));
+  textureStore(thick, vec3<i32>(id), vec4<f32>(smoke / cells, 0.0, 0.0, 0.0));
 }`;
 
 // Spreads the light volume one cell outwards; run a few times it stands in for light scattering through the smoke.
-// With dilate set the occupancy grows by a cell too, otherwise it carries.
+// Light arriving through a smoky cell is absorbed on the way, by absorb per unit of smoke, so thick smoke shades
+// itself from the flame while thin smoke glows through. With dilate set the occupancy grows by a cell too.
 export const LIGHT_BLUR = /* wgsl */ `
 override dilate: u32;
+override absorb: f32;
 @group(0) @binding(0) var src: texture_3d<f32>;
 @group(0) @binding(1) var dst: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(2) var thick: texture_3d<f32>;
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let n = vec3<i32>(textureDimensions(dst));
@@ -453,6 +470,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   var sum = vec3<f32>(0.0);
   var weight = 0.0;
   var occupancy = textureLoad(src, c, 0).a;
+  let here = textureLoad(thick, c, 0).x;
   for (var z = -1; z <= 1; z++) {
     for (var y = -1; y <= 1; y++) {
       for (var x = -1; x <= 1; x++) {
@@ -460,7 +478,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let p = c + vec3<i32>(x, y, z);
         if (all(p >= vec3<i32>(0)) && all(p < n)) {
           let tap = textureLoad(src, p, 0);
-          sum += tap.rgb * w;
+          let through = exp(-absorb * 0.5 * (here + textureLoad(thick, p, 0).x));
+          sum += tap.rgb * w * through;
           if (dilate == 1u) { occupancy = max(occupancy, tap.a); }
         }
         weight += w;
