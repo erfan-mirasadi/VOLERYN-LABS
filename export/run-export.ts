@@ -1,7 +1,7 @@
 import type { Engine } from '@/engine/engine';
 import { fitCamera, fitToContent, type Fps, loopOverlap, type OfflineJob, type RenderedFrame, substepsFor } from '@/engine/offline-render';
 import { exportMarch } from '@/engine/render';
-import { EXPORT_GRIDS } from '@/engine/scene';
+import { RENDER_GRID } from '@/engine/scene';
 import { encodeExr } from './exr';
 import type { Destination } from './files';
 import { createSheet, MOTION_RANGE } from './flipbook';
@@ -28,9 +28,9 @@ export type ExportSettings = {
   grid: '4x4' | '8x4' | '8x8';
   cell: 128 | 256 | 512;
   motion: 'off' | 'unreal' | 'unity';
-  // The grid the clip is simulated on: the preview's own, or one of the finer offline ones.
-  simulation: 'preview' | keyof typeof EXPORT_GRIDS;
-  samples: 4 | 16;
+  // How long the shutter stays open, as a share of the frame interval: 180 degrees or none.
+  shutter: 0 | 0.5;
+  samples: 4 | 16 | 32 | 64;
   loop: boolean;
 };
 
@@ -45,7 +45,7 @@ export const DEFAULT_SETTINGS: ExportSettings = {
   grid: '8x8',
   cell: 256,
   motion: 'unreal',
-  simulation: 'film',
+  shutter: 0.5,
   samples: 16,
   loop: false,
 };
@@ -75,7 +75,6 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
   const exr = settings.mode === 'sequence' && settings.format === 'exr';
   const { cols, rows, cells, stride } = flipbookTiming(settings);
   const [width, height] = flipbook ? [settings.cell, settings.cell] : settings.size.split('x').map(Number);
-  const simulation = settings.simulation === 'preview' ? undefined : EXPORT_GRIDS[settings.simulation];
   const job: OfflineJob = {
     width,
     height,
@@ -87,7 +86,8 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
     camera: flipbook ? fitCamera(snapshot.camera.eye, FLIPBOOK_FOV) : snapshot.camera,
     loop: settings.loop && !explosion,
     read: exr ? ['fire', 'firelight', 'smoke', 'data'] : flipbook && settings.motion !== 'off' ? ['display', 'data'] : ['display'],
-    simulation,
+    shutter: settings.shutter,
+    simulation: RENDER_GRID,
   };
   onProgress({ done: 0, total: job.frames, msPerFrame: 0 });
   // The clock starts at the first delivered frame, so the warm-up does not inflate the estimate.
@@ -148,6 +148,8 @@ function sidecarFor({ preset, tweaks, boxes, orbit, grid: previewGrid }: ReturnT
       substeps: substepsFor(job.fps),
       dt: 1 / (job.fps * substepsFor(job.fps)),
       samples: job.samples,
+      filter: 'gaussian, sigma 0.5 px, cut at 1.5 px',
+      shutter: job.shutter,
       grid: [...grid],
       stepCells: exportMarch(grid).stepCells,
       loop: {

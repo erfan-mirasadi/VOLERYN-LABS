@@ -9,7 +9,7 @@ import { type Backdrop, useStudioStore } from './useStudioStore';
 const QUALITY_NOTES: Record<QualityId, string> = {
   fast: 'Coarse march, scales down to half size for 60 fps.',
   balanced: 'The base grid, full size at 60 fps where the GPU allows.',
-  fine: 'A 96 × 144 × 96 grid, finer light and march, aimed at 30 fps. Restarts the fire.',
+  fine: 'A 96 × 144 × 96 grid and a finer march, aimed at 30 fps. Restarts the fire.',
   ultra: 'A 128 × 192 × 128 grid: eight times the cells, for strong GPUs. Restarts the fire.',
 };
 

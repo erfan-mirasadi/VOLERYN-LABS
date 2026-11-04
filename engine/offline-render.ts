@@ -4,7 +4,7 @@ import { LOOP_SOURCE, type Simulation } from './simulation';
 
 const MAX_OVERLAP = 32;
 // A kept loop frame is the scalars and two half-size flow fields, ten bytes a cell; the kept set stays under this.
-const KEPT_BUDGET_BYTES = 2 * 2 ** 30;
+const KEPT_BUDGET_BYTES = 3 * 2 ** 30;
 const RIM_SAMPLES = 64;
 // The content probe's frame size and, as raw half bits, the alpha a pixel needs to count as content.
 const PROBE_SIZE = 64;
@@ -28,6 +28,8 @@ export type OfflineJob = {
   camera: Camera;
   loop: boolean;
   read: Plane[];
+  // How long the shutter stays open, as a share of the frame interval; 0 renders the instant.
+  shutter: number;
   // The grid to simulate on; without one the engine renders on the grid it is showing.
   simulation?: SimulationGrid;
 };
@@ -64,6 +66,16 @@ export function halton(index: number, base: number) {
 }
 
 export const substepsFor = (fps: Fps) => Math.ceil(60 / fps);
+
+// The pixel filter: a Gaussian of half a pixel cut at a pixel and a half, as pbrt's is, drawn by its own
+// distribution so every sample keeps the same weight. The sub-pixel offset of sample s.
+const FILTER_SIGMA = 0.5;
+const FILTER_RADIUS = 1.5;
+function filterOffset(s: number): [number, number] {
+  const r = Math.min(FILTER_RADIUS, FILTER_SIGMA * Math.sqrt(-2 * Math.log(1 - halton(s + 1, 2))));
+  const angle = 2 * Math.PI * halton(s + 1, 3);
+  return [r * Math.cos(angle), r * Math.sin(angle)];
+}
 // How many frames the loop's tail is crossfaded toward its head: a quarter of the clip, as far as the kept frames fit.
 export const loopOverlap = (frames: number, grid: readonly number[]) =>
   Math.min(MAX_OVERLAP, Math.floor(KEPT_BUDGET_BYTES / (10 * grid[0] * grid[1] * grid[2])), Math.max(4, Math.round(frames / 4)));
@@ -182,6 +194,8 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
       simulation.updateLighting(pass, source);
       pass.end();
       device.queue.submit([lighting.finish()]);
+      // The samples spread over the shutter, centred on the frame, as well as over the pixel.
+      const frameTime = job.stride / job.fps;
       for (let s = 0; s < job.samples; s++) {
         renderer.drawExportSample(targets, {
           camera: job.camera,
@@ -189,10 +203,11 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
           blue: ctx.blue,
           time,
           source,
-          jitter: [halton(s + 1, 2) - 0.5, halton(s + 1, 3) - 0.5],
+          jitter: filterOffset(s),
           frame: j * job.samples + s,
           weight: 1 / job.samples,
-          frameTime: job.stride / job.fps,
+          frameTime,
+          timeOffset: job.shutter * frameTime * (halton(s + 1, 5) - 0.5),
           first: s === 0,
           sparks,
         });

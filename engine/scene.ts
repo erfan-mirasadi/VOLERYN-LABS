@@ -16,23 +16,25 @@ export type Quality = {
 export const QUALITIES = {
   fast: { grid: GRID, lightScale: 4, stepCells: 2, maxSteps: 128, scaleMin: 0.5, scaleMax: 0.875, targetFps: 60 },
   balanced: { grid: GRID, lightScale: 4, stepCells: 1.5, maxSteps: 160, scaleMin: 0.625, scaleMax: 1, targetFps: 60 },
-  fine: { grid: [96, 144, 96], lightScale: 2, stepCells: 1, maxSteps: 240, scaleMin: 0.75, scaleMax: 1, targetFps: 30 },
-  ultra: { grid: [128, 192, 128], lightScale: 2, stepCells: 0.75, maxSteps: 320, scaleMin: 0.75, scaleMax: 1, targetFps: 30 },
+  fine: { grid: [96, 144, 96], lightScale: 4, stepCells: 1, maxSteps: 240, scaleMin: 0.75, scaleMax: 1, targetFps: 30 },
+  ultra: { grid: [128, 192, 128], lightScale: 4, stepCells: 0.75, maxSteps: 320, scaleMin: 0.75, scaleMax: 1, targetFps: 30 },
 } as const satisfies Record<string, Quality>;
 export type QualityId = keyof typeof QUALITIES;
 
-// What an export simulates on instead of the preview's grid. Film is sixty-four times the base cells and holds
-// about two gigabytes of GPU memory, so only an offline render can afford it.
+// What every render simulates on: sixty-four times the base cells and about two gigabytes of GPU memory, which
+// only an offline render can afford.
 export type SimulationGrid = Pick<Quality, 'grid' | 'lightScale'>;
-export const EXPORT_GRIDS: Record<'ultra' | 'film', SimulationGrid> = {
-  ultra: QUALITIES.ultra,
-  film: { grid: [256, 384, 256], lightScale: 4 },
-};
+export const RENDER_GRID: SimulationGrid = { grid: [256, 384, 256], lightScale: 8 };
 
-// The flame's light volume on the base grid: one cell per four simulation cells, blurred in three ping-pong pairs.
-// A finer grid or light volume blurs more times, so the light spreads over the same distance in the world.
-export const LIGHT_BLUR_PASSES = 3;
-export const lightBlurDispatches = ({ grid, lightScale }: SimulationGrid) => Math.round((LIGHT_BLUR_PASSES * 2 * 4 * grid[0]) / (64 * lightScale));
+// The flame's light volume is blurred to a Gaussian of LIGHT_SIGMA base cells whatever its cell size, so the light
+// reaches the same distance on every grid; each 27-tap pass adds 0.567 cells² of variance. On the way the smoke
+// absorbs the light as if it crossed LIGHT_PATH box widths of it, shared out over the passes.
+export const LIGHT_SIGMA = 7.4;
+export const LIGHT_PATH = 0.375;
+export const lightBlurDispatches = ({ grid, lightScale }: SimulationGrid) => {
+  const cell = (lightScale * GRID[0]) / grid[0];
+  return Math.max(2, Math.round((LIGHT_SIGMA * LIGHT_SIGMA) / (0.567 * cell * cell)));
+};
 export const FIRE_LIGHT = 12;
 export const DT = 1 / 60;
 export const DENSITY = 14;

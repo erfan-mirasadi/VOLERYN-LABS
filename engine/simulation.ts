@@ -1,7 +1,7 @@
 import { bindResources } from './gpu';
 import { createNoiseTextures, type NoiseTextures } from './noise-textures';
 import { createPressureSolver } from './pressure';
-import { type Box, DENSITY, GRID, LIGHT, lightBlurDispatches, MAX_BOXES, MODE_INDEX, type Preset, type Quality, type Tweaks } from './scene';
+import { type Box, DENSITY, GRID, LIGHT, LIGHT_PATH, lightBlurDispatches, MAX_BOXES, MODE_INDEX, type Preset, type Quality, type Tweaks } from './scene';
 import { CLEAR, EMISSION, HEADER, LIGHT_BLUR, MIX, SHADERS } from './simulation-shaders';
 import { createSparkSimulation } from './sparks';
 
@@ -85,9 +85,9 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
   const clearHalf = compute(CLEAR('rgba16float'));
   const clearFloat = compute(CLEAR('r32float'));
   const emission = compute(EMISSION(quality.lightScale));
-  // Light crossing a light cell of smoke is absorbed by this much per unit of smoke, half of a straight march's
-  // worth, since the blur stands in for scattering around as much as through.
-  const absorb = (0.5 * DENSITY * quality.lightScale) / grid[0];
+  // Each pass absorbs its share of the whole path's smoke, at half a straight march's rate, since the blur stands
+  // in for scattering around as much as through.
+  const absorb = (0.5 * DENSITY * LIGHT_PATH) / blurDispatches;
   const lightBlur = [compute(LIGHT_BLUR, { dilate: 0, absorb }), compute(LIGHT_BLUR, { dilate: 1, absorb })];
   const mix = compute(MIX);
 

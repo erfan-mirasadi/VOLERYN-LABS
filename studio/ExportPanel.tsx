@@ -28,8 +28,8 @@ const ROWS: Row[] = [
   { key: 'grid', label: 'Grid', options: [['4x4', '4 × 4'], ['8x4', '8 × 4'], ['8x8', '8 × 8']], modes: ['flipbook'] },
   { key: 'cell', label: 'Cell', options: [128, 256, 512].map((px) => [px, `${px} px`]), modes: ['flipbook'] },
   { key: 'motion', label: 'Motion vectors', options: [['off', 'Off'], ['unreal', 'Unreal'], ['unity', 'Unity']], modes: ['flipbook'] },
-  { key: 'simulation', label: 'Simulation', options: [['preview', 'Preview grid'], ['ultra', 'Ultra · 128 × 192 × 128'], ['film', 'Film · 256 × 384 × 256']], modes: ALL },
-  { key: 'samples', label: 'Quality', options: [[4, 'Draft · 4 samples'], [16, 'Final · 16 samples']], modes: ALL },
+  { key: 'shutter', label: 'Motion blur', options: [[0, 'Off'], [0.5, '180° shutter']], modes: ALL },
+  { key: 'samples', label: 'Samples', options: [4, 16, 32, 64].map((n) => [n, `${n} per pixel`]), modes: ALL },
 ];
 
 const clock = (ms: number) => {
@@ -108,9 +108,6 @@ export default function ExportPanel() {
             {sheet.cells} cells · {sheet.seconds.toFixed(1)} s · {+sheet.fps.toFixed(2)} fps playback
           </p>
         )}
-        {settings.simulation === 'film' && (
-          <p className="col-span-2 text-xs text-muted">Sixty-four times the preview’s cells: about 2 GB of GPU memory, and minutes rather than seconds at 4K.</p>
-        )}
       </div>
       <label className="flex items-center gap-2">
         <input type="checkbox" checked={settings.loop && !explosion} disabled={exporting || explosion} onChange={(event) => set({ loop: event.target.checked })} className="accent-ember" />
@@ -137,7 +134,9 @@ export default function ExportPanel() {
         </div>
       )}
       {message && <p className="text-muted">{message}</p>}
-      <p className="text-xs text-muted">Chrome and Edge write into a folder you pick; other browsers download a zip.</p>
+      <p className="text-xs text-muted">
+        Every render simulates on a 256 × 384 × 256 grid, sixty-four times the viewport’s cells, so a 4K clip takes minutes. Chrome and Edge write into a folder you pick; other browsers download a zip.
+      </p>
     </fieldset>
   );
 }

@@ -13,7 +13,7 @@ const FORMATS: [term: string, detail: string][] = [
   ['Flipbooks', '4 × 4, 8 × 4 or 8 × 8 sheets at 128 to 512 px a cell, looped seamlessly, with motion vectors for Unreal or Unity.'],
   ['Video', 'H.264 MP4 at master bit rates: 16 Mb/s at 1080p, 64 Mb/s at 4K.'],
   ['Size and length', '1280 × 720 to 4096 × 2160, square or vertical, at 24 to 60 fps for 2 to 20 seconds. Fire and smoke can loop.'],
-  ['Simulation', 'A render runs its own simulation, on a grid up to 256 × 384 × 256 cells: sixty-four times the preview, marched at three quarters of a cell with 16 samples a pixel.'],
+  ['Render', 'Every render runs its own simulation on a 256 × 384 × 256 grid, sixty-four times the viewport, with velocity motion blur, a Gaussian pixel filter and up to 64 samples a pixel.'],
   ['Where it goes', 'Chrome and Edge write into a folder you pick; other browsers download a zip.'],
 ];
 

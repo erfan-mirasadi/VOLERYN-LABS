@@ -56,6 +56,10 @@ struct View {
   flowWeight: f32,
   sampleWeight: f32,
   blue: f32,
+  timeOffset: f32,
+  pad0: f32,
+  pad1: f32,
+  pad2: f32,
 }
 @group(0) @binding(0) var<uniform> V: View;
 @group(0) @binding(1) var sca: texture_3d<f32>;
@@ -129,11 +133,10 @@ fn march(frag: vec2<f32>) -> March {
   let phase = vec3<f32>(dualLobe(mu, 1.0), dualLobe(mu, 0.5), dualLobe(mu, 0.25));
   for (var i = 0; i < i32(V.maxSteps); i++) {
     if (t > tFar || transmittance < 0.01) { break; }
-    let q = (V.camPos + dir * t - V.boxMin) / size;
-    let g = q * P.size - vec3<f32>(0.5);
+    var q = (V.camPos + dir * t - V.boxMin) / size;
     var sd = 1e5;
     if (P.mode == 3.0) {
-      sd = solidDistance(g);
+      sd = solidDistance(q * P.size - vec3<f32>(0.5));
       if (sd < 0.0) {
         // Bisect back to the real surface; the coarse, jittered march would speckle it.
         var outside = t - V.stepSize;
@@ -164,6 +167,14 @@ fn march(frag: vec2<f32>) -> March {
         break;
       }
     }
+    // Motion blur: the gas here at the sample's moment in the shutter is the gas that is now a little along the
+    // flow, so the lookup moves with the velocity. Only the export asks; live the velocity taps are skipped.
+    var velocity = vec3<f32>(0.0);
+    if (V.frameTime > 0.0) {
+      velocity = velocityAt(q);
+      q = clamp(q + velocity * V.timeOffset / size, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    let g = q * P.size - vec3<f32>(0.5);
     // Blocks holding gas thinner than 0.02 count as empty and are crossed almost two blocks at a time, inside the
     // occupancy's two-block dilated margin and short of any solid the SDF reports.
     let blocks = vec3<i32>(textureDimensions(glow));
@@ -223,8 +234,7 @@ fn march(frag: vec2<f32>) -> March {
     m.firelight += scattered * flameLight;
     depthSum += transmittance * opacity * t;
     weightSum += transmittance * opacity;
-    // Only the export asks for motion; the live view skips the velocity taps.
-    if (V.frameTime > 0.0) { velocitySum += transmittance * opacity * velocityAt(q); }
+    velocitySum += transmittance * opacity * velocity;
     hottest = max(hottest, s.y);
     transmittance *= 1.0 - opacity;
     t += V.stepSize;

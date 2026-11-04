@@ -3,7 +3,7 @@ import { BOX_MAX, BOX_MIN, DENSITY, EXPOSURE, FIRE_LIGHT, FLOW_PERIOD, GRID, typ
 import type { Volumes } from './simulation';
 import { createSparkRenderer } from './sparks';
 
-const VIEW_FLOATS = 40;
+const VIEW_FLOATS = 44;
 const TARGET_FORMAT: GPUTextureFormat = 'rgba16float';
 // The export marches densely, three quarters of a cell of whatever grid it renders, and sums its samples by
 // blending, so N samples make an exact mean. The step is kept in base cells, like the view's.
@@ -50,6 +50,8 @@ type ViewParams = {
   sampleWeight: number;
   // Seconds between exported frames, which turns velocity into motion; 0 live.
   frameTime: number;
+  // Seconds this sample looks back from the frame's state, or ahead when negative: its place in the shutter.
+  timeOffset: number;
 };
 
 export type ExportSample = {
@@ -63,6 +65,7 @@ export type ExportSample = {
   frame: number;
   weight: number;
   frameTime: number;
+  timeOffset: number;
   first: boolean;
   // How much of the sparks to show, 0 to 1: a loop fades them across its seam.
   sparks: number;
@@ -197,7 +200,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   }
 
   const viewData = new Float32Array(VIEW_FLOATS);
-  function writeView({ camera, preset, blue, time, width, height, jitter, frame, stepCells, maxSteps, sampleWeight, frameTime }: ViewParams) {
+  function writeView({ camera, preset, blue, time, width, height, jitter, frame, stepCells, maxSteps, sampleWeight, frameTime, timeOffset }: ViewParams) {
     const { forward, right, up } = cameraBasis(camera);
     // Flow A's weight is 0 the moment it resets and 1 when B does; B gets the rest.
     const flowWeight = 1 - Math.abs(1 - 2 * ((time / FLOW_PERIOD) % 1));
@@ -212,6 +215,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
       -jitter[0], -jitter[1], width, height,
       maxSteps, FIRE_LIGHT, frame, preset.fireDensity,
       preset.detail, flowWeight, sampleWeight, blue,
+      timeOffset, 0, 0, 0,
     ]);
     device.queue.writeBuffer(viewBuffer, 0, viewData);
   }
@@ -233,7 +237,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     destroyTargets(retired);
     retired = null;
     const { current, history, resolveGroups, compositeGroups } = ensureTargets(encoder, frame.width, frame.height);
-    writeView({ ...frame, jitter: [0, 0], frame: frame.index, stepCells: live.stepCells, maxSteps: live.maxSteps, sampleWeight: 1, frameTime: 0 });
+    writeView({ ...frame, jitter: [0, 0], frame: frame.index, stepCells: live.stepCells, maxSteps: live.maxSteps, sampleWeight: 1, frameTime: 0, timeOffset: 0 });
     device.queue.writeBuffer(blendBuffer, 0, new Float32Array([historyValid ? frame.blend : 1]));
     const next = 1 - historyIndex;
     fullscreenPass(encoder, current.createView(), raymarch, raymarchGroups[frame.scalarIndex], frame.timestamps.render);
