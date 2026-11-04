@@ -28,6 +28,7 @@ const ROWS: Row[] = [
   { key: 'grid', label: 'Grid', options: [['4x4', '4 × 4'], ['8x4', '8 × 4'], ['8x8', '8 × 8']], modes: ['flipbook'] },
   { key: 'cell', label: 'Cell', options: [128, 256, 512].map((px) => [px, `${px} px`]), modes: ['flipbook'] },
   { key: 'motion', label: 'Motion vectors', options: [['off', 'Off'], ['unreal', 'Unreal'], ['unity', 'Unity']], modes: ['flipbook'] },
+  { key: 'simulation', label: 'Simulation', options: [['preview', 'Preview grid'], ['ultra', 'Ultra · 128 × 192 × 128'], ['film', 'Film · 256 × 384 × 256']], modes: ALL },
   { key: 'samples', label: 'Quality', options: [[4, 'Draft · 4 samples'], [16, 'Final · 16 samples']], modes: ALL },
 ];
 
@@ -106,6 +107,9 @@ export default function ExportPanel() {
           <p className="col-span-2 font-mono text-xs tabular-nums text-muted">
             {sheet.cells} cells · {sheet.seconds.toFixed(1)} s · {+sheet.fps.toFixed(2)} fps playback
           </p>
+        )}
+        {settings.simulation === 'film' && (
+          <p className="col-span-2 text-xs text-muted">Sixty-four times the preview’s cells: about 2 GB of GPU memory, and minutes rather than seconds at 4K.</p>
         )}
       </div>
       <label className="flex items-center gap-2">

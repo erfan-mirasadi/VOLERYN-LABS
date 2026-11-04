@@ -5,9 +5,14 @@ import { createSparkRenderer } from './sparks';
 
 const VIEW_FLOATS = 40;
 const TARGET_FORMAT: GPUTextureFormat = 'rgba16float';
-// The export marches densely, in base cells, and sums its samples by blending, so N samples make an exact mean.
-export const EXPORT_STEP_CELLS = 0.75;
+// The export marches densely, three quarters of a cell of whatever grid it renders, and sums its samples by
+// blending, so N samples make an exact mean. The step is kept in base cells, like the view's.
+const EXPORT_STEP_CELLS = 0.75;
 const EXPORT_MAX_STEPS = 320;
+export function exportMarch(grid: readonly number[]) {
+  const k = grid[0] / GRID[0];
+  return { stepCells: EXPORT_STEP_CELLS / k, maxSteps: EXPORT_MAX_STEPS * k };
+}
 const ADD: GPUBlendComponent = { srcFactor: 'one', dstFactor: 'one', operation: 'add' };
 
 export type Vec3 = [number, number, number];
@@ -69,6 +74,7 @@ export type ExportTargets = ReturnType<Renderer['createExportTargets']>;
 export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volumes: Volumes, initialQuality: Quality) {
   // The live raymarch's step and step count; a quality change without a new grid only swaps these.
   let live = { stepCells: initialQuality.stepCells, maxSteps: initialQuality.maxSteps };
+  const offline = exportMarch(initialQuality.grid);
   const pipeline = (module: GPUShaderModule, entryPoint: string, targets: GPUColorTargetState[]) =>
     device.createRenderPipeline({
       layout: 'auto',
@@ -273,7 +279,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   function drawExportSample(targets: ExportTargets, sample: ExportSample) {
     const { march, groups } = exportResources();
     const { width, height } = targets;
-    writeView({ ...sample, width, height, stepCells: EXPORT_STEP_CELLS, maxSteps: EXPORT_MAX_STEPS, sampleWeight: sample.weight });
+    writeView({ ...sample, width, height, ...offline, sampleWeight: sample.weight });
     const loadOp: GPULoadOp = sample.first ? 'clear' : 'load';
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginRenderPass({

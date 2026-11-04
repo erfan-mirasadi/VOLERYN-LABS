@@ -149,7 +149,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
 
   function startBurst() {
     burstStart = simTime;
-    if (soundOn && preset.mode === 'explosion') sound?.burst();
+    if (audible() && preset.mode === 'explosion') sound?.burst();
   }
 
   // One simulation step of dt seconds; a live explosion re-arms its charge every BURST_EVERY seconds, an exported one goes off once.
@@ -358,9 +358,11 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
         boxes: boxes.map((box) => ({ ...box })),
         camera: { eye: eye(), target: [...target] as Vec3, tanHalfFov: Math.tan(FOV / 2) },
         orbit: { azimuth, polar, distance: ORBIT_DISTANCE, fovDegrees: (FOV * 180) / Math.PI },
+        grid: simulation.grid,
       };
     },
-    // Pauses the live loop, restarts the simulation from nothing and renders the job frame by frame.
+    // Pauses the live loop, restarts the simulation from nothing, on the job's grid if it names one, and renders the
+    // job frame by frame; the preview's grid comes back afterwards.
     async render(job: OfflineJob, onFrame: (frame: RenderedFrame) => Promise<void>, signal: AbortSignal) {
       if (exporting) throw new Error('An export is already running.');
       exporting = true;
@@ -368,8 +370,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       looping = false;
       syncSound();
       fps = stepsPerSecond = 0;
-      simulation.clear();
-      simTime = burstStart = 0;
+      const previewQuality = quality;
       const step = (dt: number) => {
         const encoder = device.createCommandEncoder();
         const pass = encoder.beginComputePass();
@@ -379,9 +380,17 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
         return simTime;
       };
       try {
+        if (job.simulation) {
+          device.pushErrorScope('out-of-memory');
+          applyQuality({ ...quality, ...job.simulation });
+          if (await device.popErrorScope()) throw new Error('Not enough GPU memory for this simulation grid; try a smaller one.');
+        }
+        simulation.clear();
+        simTime = burstStart = 0;
         await renderOffline({ device, context, canvas, simulation, renderer, preset, blue: tweaks.blue, step }, job, onFrame, signal);
       } finally {
         exporting = false;
+        if (job.simulation) applyQuality(previewQuality);
         syncSound();
         stepsSince = stepCount;
         renderer.resetHistory();

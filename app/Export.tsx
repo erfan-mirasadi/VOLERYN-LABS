@@ -11,8 +11,9 @@ const LAYERS: [layer: string, channels: string, holds: string][] = [
 const FORMATS: [term: string, detail: string][] = [
   ['Sequences', 'PNG at 8 or 16 bits, premultiplied or straight. EXR in half float, with the camera matrices, frame rate and Rec. 709 chromaticities in the header.'],
   ['Flipbooks', '4 × 4, 8 × 4 or 8 × 8 sheets at 128 to 512 px a cell, looped seamlessly, with motion vectors for Unreal or Unity.'],
-  ['Video', 'H.264 MP4.'],
-  ['Size and length', '1280 × 720 to 3840 × 2160, square or vertical, at 24 to 60 fps for 2 to 20 seconds. Fire and smoke can loop.'],
+  ['Video', 'H.264 MP4 at master bit rates: 16 Mb/s at 1080p, 64 Mb/s at 4K.'],
+  ['Size and length', '1280 × 720 to 4096 × 2160, square or vertical, at 24 to 60 fps for 2 to 20 seconds. Fire and smoke can loop.'],
+  ['Simulation', 'A render runs its own simulation, on a grid up to 256 × 384 × 256 cells: sixty-four times the preview, marched at three quarters of a cell with 16 samples a pixel.'],
   ['Where it goes', 'Chrome and Edge write into a folder you pick; other browsers download a zip.'],
 ];
 

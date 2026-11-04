@@ -1,6 +1,7 @@
 import type { Engine } from '@/engine/engine';
 import { fitCamera, fitToContent, type Fps, loopOverlap, type OfflineJob, type RenderedFrame, substepsFor } from '@/engine/offline-render';
-import { EXPORT_STEP_CELLS } from '@/engine/render';
+import { exportMarch } from '@/engine/render';
+import { EXPORT_GRIDS } from '@/engine/scene';
 import { encodeExr } from './exr';
 import type { Destination } from './files';
 import { createSheet, MOTION_RANGE } from './flipbook';
@@ -14,7 +15,7 @@ const FLIPBOOK_FOV = 20;
 // A sheet simulates at 60 fps and keeps every stride-th frame, so its cells span the clip at whatever playback rate that gives.
 const FLIPBOOK_FPS = 60;
 
-export const SIZES = ['1280x720', '1920x1080', '2560x1440', '3840x2160', '1080x1080', '1080x1920'] as const;
+export const SIZES = ['1280x720', '1920x1080', '2560x1440', '3840x2160', '4096x2160', '1080x1080', '1080x1920'] as const;
 
 export type ExportSettings = {
   mode: 'sequence' | 'flipbook' | 'video';
@@ -27,6 +28,8 @@ export type ExportSettings = {
   grid: '4x4' | '8x4' | '8x8';
   cell: 128 | 256 | 512;
   motion: 'off' | 'unreal' | 'unity';
+  // The grid the clip is simulated on: the preview's own, or one of the finer offline ones.
+  simulation: 'preview' | keyof typeof EXPORT_GRIDS;
   samples: 4 | 16;
   loop: boolean;
 };
@@ -42,7 +45,8 @@ export const DEFAULT_SETTINGS: ExportSettings = {
   grid: '8x8',
   cell: 256,
   motion: 'unreal',
-  samples: 4,
+  simulation: 'film',
+  samples: 16,
   loop: false,
 };
 
@@ -71,6 +75,7 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
   const exr = settings.mode === 'sequence' && settings.format === 'exr';
   const { cols, rows, cells, stride } = flipbookTiming(settings);
   const [width, height] = flipbook ? [settings.cell, settings.cell] : settings.size.split('x').map(Number);
+  const simulation = settings.simulation === 'preview' ? undefined : EXPORT_GRIDS[settings.simulation];
   const job: OfflineJob = {
     width,
     height,
@@ -82,6 +87,7 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
     camera: flipbook ? fitCamera(snapshot.camera.eye, FLIPBOOK_FOV) : snapshot.camera,
     loop: settings.loop && !explosion,
     read: exr ? ['fire', 'firelight', 'smoke', 'data'] : flipbook && settings.motion !== 'off' ? ['display', 'data'] : ['display'],
+    simulation,
   };
   onProgress({ done: 0, total: job.frames, msPerFrame: 0 });
   // The clock starts at the first delivered frame, so the warm-up does not inflate the estimate.
@@ -118,11 +124,12 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
 }
 
 // Every input the job had, so the same frames can be rendered again.
-function sidecarFor({ preset, tweaks, boxes, orbit }: ReturnType<Engine['snapshot']>, settings: ExportSettings, job: OfflineJob) {
+function sidecarFor({ preset, tweaks, boxes, orbit, grid: previewGrid }: ReturnType<Engine['snapshot']>, settings: ExportSettings, job: OfflineJob) {
   const exr = settings.mode === 'sequence' && settings.format === 'exr';
   const flipbook = settings.mode === 'flipbook';
   const [cols, rows] = settings.grid.split('x').map(Number);
-  const overlap = job.loop ? loopOverlap(job.frames) : 0;
+  const grid = job.simulation?.grid ?? previewGrid;
+  const overlap = job.loop ? loopOverlap(job.frames, grid) : 0;
   return {
     app: 'Voleryn Labs',
     version: 1,
@@ -141,7 +148,8 @@ function sidecarFor({ preset, tweaks, boxes, orbit }: ReturnType<Engine['snapsho
       substeps: substepsFor(job.fps),
       dt: 1 / (job.fps * substepsFor(job.fps)),
       samples: job.samples,
-      stepCells: EXPORT_STEP_CELLS,
+      grid: [...grid],
+      stepCells: exportMarch(grid).stepCells,
       loop: {
         overlap,
         method: 'field-space crossfade',

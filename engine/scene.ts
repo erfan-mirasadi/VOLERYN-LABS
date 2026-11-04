@@ -21,10 +21,18 @@ export const QUALITIES = {
 } as const satisfies Record<string, Quality>;
 export type QualityId = keyof typeof QUALITIES;
 
+// What an export simulates on instead of the preview's grid. Film is sixty-four times the base cells and holds
+// about two gigabytes of GPU memory, so only an offline render can afford it.
+export type SimulationGrid = Pick<Quality, 'grid' | 'lightScale'>;
+export const EXPORT_GRIDS: Record<'ultra' | 'film', SimulationGrid> = {
+  ultra: QUALITIES.ultra,
+  film: { grid: [256, 384, 256], lightScale: 4 },
+};
+
 // The flame's light volume on the base grid: one cell per four simulation cells, blurred in three ping-pong pairs.
 // A finer grid or light volume blurs more times, so the light spreads over the same distance in the world.
 export const LIGHT_BLUR_PASSES = 3;
-export const lightBlurDispatches = ({ grid, lightScale }: Quality) => Math.min(16, Math.round((LIGHT_BLUR_PASSES * 2 * 4 * grid[0]) / (64 * lightScale)));
+export const lightBlurDispatches = ({ grid, lightScale }: SimulationGrid) => Math.round((LIGHT_BLUR_PASSES * 2 * 4 * grid[0]) / (64 * lightScale));
 export const FIRE_LIGHT = 12;
 export const DT = 1 / 60;
 export const DENSITY = 14;

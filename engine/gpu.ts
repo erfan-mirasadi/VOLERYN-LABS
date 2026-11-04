@@ -12,7 +12,11 @@ export async function requestGpu(): Promise<Gpu> {
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new WebGpuUnavailable('No WebGPU adapter was found.');
   const hasTimestamps = adapter.features.has('timestamp-query');
-  const device = await adapter.requestDevice({ requiredFeatures: hasTimestamps ? ['timestamp-query'] : [] });
+  // A 4K EXR frame stages its four planes in one buffer, larger than the default limit allows.
+  const device = await adapter.requestDevice({
+    requiredFeatures: hasTimestamps ? ['timestamp-query'] : [],
+    requiredLimits: { maxBufferSize: adapter.limits.maxBufferSize },
+  });
   const info = adapter.info;
   return {
     device,

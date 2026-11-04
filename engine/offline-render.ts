@@ -1,8 +1,10 @@
 import { type Camera, cameraBasis, type Renderer, unit, type Vec3 } from './render';
-import { BOX_MAX, BOX_MIN, type Preset } from './scene';
+import { BOX_MAX, BOX_MIN, type Preset, type SimulationGrid } from './scene';
 import { LOOP_SOURCE, type Simulation } from './simulation';
 
 const MAX_OVERLAP = 32;
+// A kept loop frame is the scalars and two half-size flow fields, ten bytes a cell; the kept set stays under this.
+const KEPT_BUDGET_BYTES = 2 * 2 ** 30;
 const RIM_SAMPLES = 64;
 // The content probe's frame size and, as raw half bits, the alpha a pixel needs to count as content.
 const PROBE_SIZE = 64;
@@ -26,6 +28,8 @@ export type OfflineJob = {
   camera: Camera;
   loop: boolean;
   read: Plane[];
+  // The grid to simulate on; without one the engine renders on the grid it is showing.
+  simulation?: SimulationGrid;
 };
 
 // Raw rgba16float texels, four halves per pixel, row y starting at y * stride halves.
@@ -60,8 +64,9 @@ export function halton(index: number, base: number) {
 }
 
 export const substepsFor = (fps: Fps) => Math.ceil(60 / fps);
-// How many frames the loop's tail is crossfaded toward its head.
-export const loopOverlap = (frames: number) => Math.min(MAX_OVERLAP, Math.max(4, Math.round(frames / 4)));
+// How many frames the loop's tail is crossfaded toward its head: a quarter of the clip, as far as the kept frames fit.
+export const loopOverlap = (frames: number, grid: readonly number[]) =>
+  Math.min(MAX_OVERLAP, Math.floor(KEPT_BUDGET_BYTES / (10 * grid[0] * grid[1] * grid[2])), Math.max(4, Math.round(frames / 4)));
 
 // A narrow lens on the user's orbit direction, pulled back until the domain's inscribed cylinder fits a square frame
 // with a margin: the box corners would hold an oblique view further out for nothing.
@@ -133,12 +138,13 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
   const warmupSteps = Math.round(job.warmup / dt);
   for (let n = 1; n <= warmupSteps; n++) {
     time = ctx.step(dt);
-    if (n % 60 === 0) {
+    // Every few steps the queue drains, so a cancel lands within seconds even when a film-grid step takes a while.
+    if (n % 8 === 0) {
       await device.queue.onSubmittedWorkDone();
       signal.throwIfAborted();
     }
   }
-  const overlap = job.loop ? loopOverlap(job.frames) : 0;
+  const overlap = job.loop ? loopOverlap(job.frames, simulation.grid) : 0;
   const bytesPerRow = Math.ceil((8 * job.width) / 256) * 256;
   const planeBytes = bytesPerRow * job.height;
   const slotBytes = job.read.length * planeBytes;
