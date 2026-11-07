@@ -153,13 +153,13 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   }
 
   // One simulation step of dt seconds; a live explosion re-arms its charge every BURST_EVERY seconds, an exported one goes off once.
-  function advance(pass: GPUComputePassEncoder, dt: number, slot = 0) {
+  function advance(pass: GPUComputePassEncoder, dt: number, slot = 0, next?: () => GPUComputePassEncoder) {
     if (!exporting && preset.mode === 'explosion' && simTime - burstStart > BURST_EVERY) startBurst();
     const age = simTime - burstStart;
     const emitting = preset.mode !== 'explosion' || age < (preset.burst ?? 0);
     const blast = preset.mode === 'explosion' ? (preset.blast ?? 0) * Math.exp(-age / BLAST_DECAY) : 0;
     simulation.writeParams(slot, { preset, tweaks, boxes, time: simTime, dt, emitting, blast });
-    simulation.step(pass, slot);
+    simulation.step(pass, slot, next);
     simTime += dt;
     stepCount++;
   }
@@ -372,9 +372,16 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       fps = stepsPerSecond = 0;
       const previewQuality = quality;
       const step = (dt: number) => {
-        const encoder = device.createCommandEncoder();
-        const pass = encoder.beginComputePass();
-        advance(pass, dt);
+        let encoder = device.createCommandEncoder();
+        let pass = encoder.beginComputePass();
+        const next = () => {
+          pass.end();
+          device.queue.submit([encoder.finish()]);
+          encoder = device.createCommandEncoder();
+          pass = encoder.beginComputePass();
+          return pass;
+        };
+        advance(pass, dt, 0, next);
         pass.end();
         device.queue.submit([encoder.finish()]);
         return simTime;

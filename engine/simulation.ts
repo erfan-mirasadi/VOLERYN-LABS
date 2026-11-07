@@ -153,8 +153,10 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
     sparks.writeParams(slot, tweaks.sparks);
   }
 
-  // Velocity first: advect, add forces, project; then the scalars ride the divergence-free field.
-  function step(pass: GPUComputePassEncoder, slot: number) {
+  // Velocity first: advect, add forces, project; then the scalars ride the divergence-free field. An export passes
+  // `next`, which submits what is encoded so far and opens a fresh pass, so a render-grid step spans three short
+  // command buffers instead of one that could trip a GPU watchdog.
+  function step(pass: GPUComputePassEncoder, slot: number, next?: () => GPUComputePassEncoder) {
     const g = groups[slot];
     pressure.updateSolids(pass);
     run(pass, pipelines.predictVelocity, g.predictVelocity);
@@ -163,7 +165,9 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
     run(pass, pipelines.forces, g.forces[sc]);
     run(pass, pipelines.applyForces, g.applyForces);
     run(pass, pipelines.divergence, g.divergence[sc]);
+    pass = next?.() ?? pass;
     pressure.solve(pass);
+    pass = next?.() ?? pass;
     run(pass, pipelines.project, g.project);
     run(pass, pipelines.predict, g.predict[sc]);
     run(pass, pipelines.correct, g.correct[sc]);
