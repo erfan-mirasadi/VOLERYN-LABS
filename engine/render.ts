@@ -14,6 +14,7 @@ export function exportMarch(grid: readonly number[]) {
   return { stepCells: EXPORT_STEP_CELLS / k, maxSteps: EXPORT_MAX_STEPS * k };
 }
 const ADD: GPUBlendComponent = { srcFactor: 'one', dstFactor: 'one', operation: 'add' };
+const BAND_PIXELS = 1.5 * 2 ** 20;
 
 export type Vec3 = [number, number, number];
 
@@ -278,23 +279,35 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     };
   }
 
-  // One sample of an export frame, in its own submit: the view uniform is written before the queue runs, and a
-  // short command buffer stays clear of the GPU watchdog even at 4K.
+  // One sample of an export frame, marched in bands of about BAND_PIXELS, each its own submit: the view uniform is
+  // written before the queue runs, and no command buffer runs long enough to trip a GPU watchdog, even at 4K on
+  // the render grid. The first band of a frame's first sample clears the layers; the sparks go on with the last.
   function drawExportSample(targets: ExportTargets, sample: ExportSample) {
     const { march, groups } = exportResources();
     const { width, height } = targets;
     writeView({ ...sample, width, height, ...offline, sampleWeight: sample.weight });
-    const loadOp: GPULoadOp = sample.first ? 'clear' : 'load';
-    const encoder = device.createCommandEncoder();
-    const pass = encoder.beginRenderPass({
-      colorAttachments: Object.values(targets.layers).map((layer) => ({ view: layer.createView(), loadOp, storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } })),
-    });
-    pass.setPipeline(march);
-    pass.setBindGroup(0, groups[sample.source]);
-    pass.draw(3);
-    sparks.drawExport(pass, sample.source, sample.sparks);
-    pass.end();
-    device.queue.submit([encoder.finish()]);
+    const bands = Math.ceil((width * height) / BAND_PIXELS);
+    const rows = Math.ceil(height / bands);
+    for (let b = 0; b < bands; b++) {
+      const y = b * rows;
+      const h = Math.min(rows, height - y);
+      if (h <= 0) break;
+      const loadOp: GPULoadOp = sample.first && b === 0 ? 'clear' : 'load';
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginRenderPass({
+        colorAttachments: Object.values(targets.layers).map((layer) => ({ view: layer.createView(), loadOp, storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } })),
+      });
+      pass.setPipeline(march);
+      pass.setBindGroup(0, groups[sample.source]);
+      pass.setScissorRect(0, y, width, h);
+      pass.draw(3);
+      if (y + h >= height) {
+        pass.setScissorRect(0, 0, width, height);
+        sparks.drawExport(pass, sample.source, sample.sparks);
+      }
+      pass.end();
+      device.queue.submit([encoder.finish()]);
+    }
   }
 
   function drawDisplay(encoder: GPUCommandEncoder, targets: ExportTargets) {

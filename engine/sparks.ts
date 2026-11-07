@@ -2,8 +2,9 @@ import { bindResources } from './gpu';
 import type { Volumes } from './simulation';
 import { SPARK_COUNT, SPARK_DRAW, SPARK_STEP } from './spark-shaders';
 
-// Sparks per second the whole pool spawns at full strength, and how many an explosion throws per unit of blast.
-const SPAWN_RATE = 800;
+// Sparks per second the whole pool trickles at full strength, besides the pops, and how many an explosion throws
+// per unit of blast.
+const SPAWN_RATE = 500;
 const BURST_PER_BLAST = 120;
 const FLOATS_PER_SPARK = 8;
 const WORKGROUP = 64;
@@ -25,7 +26,7 @@ export function createSparkSimulation(device: GPUDevice, { paramSlots, velocity,
   return {
     buffer,
     writeParams(slot: number, strength: number) {
-      spawnData.set([(SPAWN_RATE * strength) / SPARK_COUNT, (BURST_PER_BLAST * strength) / SPARK_COUNT]);
+      spawnData.set([(SPAWN_RATE * strength) / SPARK_COUNT, (BURST_PER_BLAST * strength) / SPARK_COUNT, strength]);
       device.queue.writeBuffer(spawn[slot], 0, spawnData);
     },
     step(pass: GPUComputePassEncoder, slot: number, scalarIndex: number) {
