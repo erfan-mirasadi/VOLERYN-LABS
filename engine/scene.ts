@@ -71,6 +71,8 @@ export type Preset = {
   // Fuel only burns where the gas is at least this hot.
   ignite: number;
   heat: number;
+  // Soot formed per unit of fuel burnt, in smoke density; most of it burns out again while the flame is hot, and
+  // what is left when the gas cools is the smoke. The tint further down is that smoke's single-scattering albedo.
   smokeYield: number;
   dissipation: number;
   emit: number;

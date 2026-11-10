@@ -32,6 +32,8 @@ const BLUE_FLAME = vec3<f32>(0.5, 1.4, 4.5);
 // Emission per unit of extinction: the flame is thin enough to see through, so its light is turned up.
 const FLAME_GAIN = 2.2;
 const ALBEDO = vec3<f32>(0.03, 0.025, 0.02);
+// Soot absorbs about as 1 / wavelength: red, green and blue against green. Light that crosses it reddens.
+const SOOT_ABSORPTION = vec3<f32>(0.9, 1.0, 1.18);
 struct View {
   camPos: vec3<f32>,
   tanHalf: f32,
@@ -85,6 +87,7 @@ fn jitter(p: vec2<f32>, frame: f32) -> f32 {
 // Henyey-Greenstein with the 4 pi folded in, so g = 0 gives 1; smoke scatters mostly forward with a little back.
 fn hg(mu: f32, g: f32) -> f32 { return (1.0 - g * g) / pow(1.0 + g * g - 2.0 * g * mu, 1.5); }
 fn dualLobe(mu: f32, k: f32) -> f32 { return 0.8 * hg(mu, 0.45 * k) + 0.2 * hg(mu, -0.25 * k); }
+fn mean(v: vec3<f32>) -> f32 { return (v.r + v.g + v.b) / 3.0; }
 
 // The solver keeps velocity on the lower cell faces in cells per second; one cell is 1 / P.size.x world units.
 fn velocityAt(q: vec3<f32>) -> vec3<f32> {
@@ -123,7 +126,7 @@ fn march(frag: vec2<f32>) -> March {
   if (tFar <= max(tNear, 0.0)) { return m; }
   let size = V.boxMax - V.boxMin;
   var t = max(tNear, 0.0) + V.stepSize * jitter(frag, V.frame);
-  var transmittance = 1.0;
+  var transmittance = vec3<f32>(1.0);
   var depthSum = 0.0;
   var weightSum = 0.0;
   var hottest = 0.0;
@@ -132,7 +135,7 @@ fn march(frag: vec2<f32>) -> March {
   let mu = dot(dir, P.lightDir);
   let phase = vec3<f32>(dualLobe(mu, 1.0), dualLobe(mu, 0.5), dualLobe(mu, 0.25));
   for (var i = 0; i < i32(V.maxSteps); i++) {
-    if (t > tFar || transmittance < 0.01) { break; }
+    if (t > tFar || max(transmittance.r, max(transmittance.g, transmittance.b)) < 0.01) { break; }
     var q = (V.camPos + dir * t - V.boxMin) / size;
     var sd = 1e5;
     if (P.mode == 3.0) {
@@ -160,10 +163,10 @@ fn march(frag: vec2<f32>) -> March {
         m.smoke += transmittance * ALBEDO * lit;
         m.firelight += transmittance * ALBEDO * flameLight;
         m.fire += transmittance * ember;
-        depthSum += transmittance * hit;
-        weightSum += transmittance;
+        depthSum += mean(transmittance) * hit;
+        weightSum += mean(transmittance);
         hottest = max(hottest, surface.y);
-        transmittance = 0.0;
+        transmittance = vec3<f32>(0.0);
         break;
       }
     }
@@ -218,31 +221,40 @@ fn march(frag: vec2<f32>) -> March {
     let lean = min(2.0 * V.blue, 1.0) * reaction * fresh;
     let light = textureSampleLevel(shade, lin, q, 0.0);
     let flameLight = lightHere.rgb * V.fireLight * V.fire;
-    let sigmaSmoke = s.x * V.density;
+    // The smoke's tint is its single-scattering albedo: that share of what it stops is scattered, evenly over the
+    // spectrum. The rest is absorbed, more of it in the blue, and what absorbs also emits: soot that is still hot
+    // glows with the flame's own colour for its temperature, and goes black only once it has cooled.
+    let smoke = s.x * V.density;
+    let absorbing = (vec3<f32>(1.0) - V.smokeTint) * SOOT_ABSORPTION;
+    let extinction = V.smokeTint + absorbing;
     let sigmaFire = V.fireDensity * flame(s.y) * breakup * (1.0 - 0.95 * lean);
-    let sigma = sigmaSmoke + sigmaFire;
-    let opacity = 1.0 - exp(-sigma * V.stepSize);
-    let reach = transmittance * opacity / max(sigma, 1e-4);
-    m.fire += reach * sigmaFire * blackbody(s.y + 0.5 * reaction) * (0.7 + 0.5 * reaction) * coreTexture * FLAME_GAIN * V.fire;
+    let sigma = smoke * extinction + vec3<f32>(sigmaFire);
+    let opacity = vec3<f32>(1.0) - exp(-sigma * V.stepSize);
+    let reach = transmittance * opacity / max(sigma, vec3<f32>(1e-4));
+    let glowing = vec3<f32>(sigmaFire) + smoke * absorbing * flame(s.y);
+    m.fire += reach * glowing * blackbody(s.y + 0.5 * reaction) * (0.7 + 0.5 * reaction) * coreTexture * FLAME_GAIN * V.fire;
     m.fire += transmittance * V.stepSize * lean * BLUE_FLAME * V.fire;
-    // Wrenninge octaves: each softer and weaker, standing in for light scattered more than once; the weights sum to
-    // one so an unshadowed cell gets exactly the key.
-    let key = (4.0 * phase.x * light.x + 2.0 * phase.y * sqrt(light.x) + phase.z * sqrt(sqrt(light.x))) / 7.0;
+    // Wrenninge octaves: each softer and weaker, standing in for light scattered more than once. Every further
+    // bounce costs the albedo again, so white smoke fills its own shadows and soot, which keeps a fifth of the light
+    // per bounce, stays black in them. The key reddens on its way in as the view does on its way out.
+    let sun = pow(vec3<f32>(light.x), extinction);
+    let key = (4.0 * phase.x * sun + V.smokeTint * (2.0 * phase.y * sqrt(sun) + V.smokeTint * phase.z * sqrt(sqrt(sun)))) / 7.0;
     let ambient = mix(GROUND_COLOR, SKY_COLOR, light.y);
-    let scattered = reach * sigmaSmoke * V.smokeTint;
+    let scattered = reach * smoke * V.smokeTint;
     m.smoke += scattered * (KEY_STRENGTH * KEY_COLOR * key + ambient);
     m.firelight += scattered * flameLight;
-    depthSum += transmittance * opacity * t;
-    weightSum += transmittance * opacity;
-    velocitySum += transmittance * opacity * velocity;
+    let seen = mean(transmittance * opacity);
+    depthSum += seen * t;
+    weightSum += seen;
+    velocitySum += seen * velocity;
     hottest = max(hottest, s.y);
-    transmittance *= 1.0 - opacity;
+    transmittance *= vec3<f32>(1.0) - opacity;
     t += V.stepSize;
   }
   m.fire *= V.exposure;
   m.firelight *= V.exposure;
   m.smoke *= V.exposure;
-  m.alpha = 1.0 - transmittance;
+  m.alpha = 1.0 - mean(transmittance);
   m.depth = depthSum / max(weightSum, 1e-6);
   m.velocity = velocitySum / max(weightSum, 1e-6);
   m.seen = weightSum;

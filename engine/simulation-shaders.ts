@@ -172,6 +172,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(4) var dst: texture_storage_3d<rgba16float, write>;
 @group(0) @binding(5) var lin: sampler;
 ${TRACE}
+// How fast soot burns out in gas hot enough to oxidise it, per second.
+const SOOT_BURNOUT = 8.0;
+// The share of the cooling rate left to gas too cool to glow.
+const AFTERHEAT_COOLING = 0.04;
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
@@ -190,16 +194,23 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     hi = max(hi, s);
   }
   q = clamp(q, lo, hi);
-  // Fuel burns where the gas is hot enough to ignite, into heat and soot; heat and soot then fade.
+  // Fuel burns where the gas is hot enough to ignite, into heat and soot; the heat then fades.
   let rate = P.burn * smoothstep(P.ignite, P.ignite + 0.25, q.y);
   let burned = q.z * (1.0 - exp(-rate * P.dt));
   q.z -= burned;
   // The burn rate rides in w so the pressure solve can let burning gas expand.
   q.w = burned / P.dt;
-  q.y = (q.y + burned * P.heat) * exp(-P.cooling * P.dt);
-  // Cool, slow burning makes more soot than a hot flame.
-  let soot = burned * P.smokeYield * (1.0 + 3.0 * (1.0 - clamp(q.y, 0.0, 1.0)));
-  q.x = (q.x + soot) * exp(-P.dissipation * P.dt);
+  // Radiation is what cools a flame, and it goes as the fourth power of the temperature: fierce while the soot
+  // glows, next to nothing once it has gone dark. So below the glow the gas keeps most of the heat it has left,
+  // and that heat is what carries the smoke column up.
+  let hot = q.y + burned * P.heat;
+  q.y = hot * exp(-P.cooling * mix(AFTERHEAT_COOLING, 1.0, smoothstep(0.05, 0.2, hot)) * P.dt);
+  // Soot forms wherever fuel burns and burns out again while the gas around it stays hot. Below about 1300 K that
+  // oxidation stalls (Kent and Wagner, 1984), so the soot still left when the flame cools, at its tips and in the
+  // eddies the air quenches along its edge, is what leaves as black smoke. On the blackbody scale 1300 K is 0.5.
+  // Smoke that has no flame under it is not soot on its way through one, so it keeps what it has.
+  let burnout = select(0.0, SOOT_BURNOUT * smoothstep(0.5, 0.8, q.y), P.burn > 0.0);
+  q.x = (q.x + burned * P.smokeYield) * exp(-(burnout + P.dissipation) * P.dt);
   let k = cellScale();
   let flicker = noise3(p * 0.3 / k + vec3<f32>(0.0, -P.time * 4.0, P.time * 1.3) + seedShift());
   if (P.mode == 3.0) {
@@ -289,6 +300,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(4) var stir: texture_3d<f32>;
 @group(0) @binding(5) var rep: sampler;
 fn spin(c: vec3<i32>) -> f32 { return textureLoad(curl, clampc(c), 0).w; }
+// A flame's body is lifted in step with its temperature. Gas that has stopped glowing is still hundreds of degrees
+// hot, and by the gas law most of the weight a gas can lose is gone by twice the air's temperature, so below the
+// glow the lift follows that curve instead of the straight line, which would leave the smoke column standing.
+fn lift(t: f32) -> f32 { return max(t, 0.5 * t / (t + 0.1)); }
 // The velocity each cell gains this step, taken at its centre; applyForces spreads it onto the faces.
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -297,7 +312,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let p = vec3<f32>(c);
   let k = cellScale();
   let s = textureLoad(sca, c, 0);
-  var v = vec3<f32>(0.0, P.dt * (P.buoyancy * s.y - 4.0 * k * s.x), 0.0);
+  // Soot weighs next to nothing in the gas that carries it; the mist of a smoke source is heavier and sinks a little.
+  let weight = select(4.0 * k * s.x, 0.0, P.burn > 0.0);
+  var v = vec3<f32>(0.0, P.dt * (P.buoyancy * lift(s.y) - weight), 0.0);
   // Vorticity confinement: push along N x omega to give back the swirls the coarse grid smooths away.
   let grad = 0.5 * vec3<f32>(spin(c + X) - spin(c - X), spin(c + Y) - spin(c - Y), spin(c + Z) - spin(c - Z));
   let len = length(grad);

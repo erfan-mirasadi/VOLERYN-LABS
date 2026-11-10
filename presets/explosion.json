@@ -6,7 +6,7 @@
   "cooling": 2,
   "burn": 25,
   "heat": 0.8,
-  "smokeYield": 0.6,
+  "smokeYield": 6,
   "dissipation": 0.15,
   "emit": 40,
   "radius": 8,
