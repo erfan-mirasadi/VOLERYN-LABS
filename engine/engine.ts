@@ -2,7 +2,8 @@ import { createFireSound, type FireSound } from './fire-sound';
 import { requestGpu } from './gpu';
 import { GpuTimer } from './gpu-timer';
 import { type OfflineJob, type RenderedFrame, renderOffline } from './offline-render';
-import { cameraBasis, createRenderer, type Vec3 } from './render';
+import { type Plate, seekPlate } from './plate';
+import { type Camera, cameraBasis, createRenderer, type Vec3 } from './render';
 import { BLAST_DECAY, type Box, BURST_EVERY, DT, MAX_BOXES, type Preset, QUALITIES, type Quality, type Tweaks } from './scene';
 import { createSimulation } from './simulation';
 
@@ -39,6 +40,10 @@ export type EngineStats = {
   sound: number | AudioContextState | 'off';
 };
 
+// Where the picture sits in the frame: x and y slide it, in half-frames to the right and up, and scale zooms it
+// about that point. All three leave the view of the fire itself as the orbit set it.
+export type Framing = { x: number; y: number; scale: number };
+
 export type Engine = Awaited<ReturnType<typeof createEngine>>;
 
 export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Preset, initialQuality: Quality = QUALITIES.balanced) {
@@ -66,6 +71,8 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   let audio: AudioContext | null = null;
   let sound: FireSound | null = null;
   let soundOn = false;
+  let plate: Plate | null = null;
+  let framing: Framing = { x: 0, y: 0, scale: 1 };
 
   const target: Vec3 = [0, 0.72, 0];
   let azimuth = 0.5;
@@ -79,6 +86,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     target[1] + ORBIT_DISTANCE * Math.cos(polar),
     target[2] + ORBIT_DISTANCE * Math.sin(polar) * Math.cos(azimuth),
   ];
+  const camera = (): Camera => ({ eye: eye(), target, tanHalfFov: Math.tan(FOV / 2) / framing.scale, shift: [framing.x, framing.y] });
 
   let fpsFrames = 0;
   let fpsSince = 0;
@@ -124,6 +132,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       simulation.dispose();
       simulation = createSimulation(device, quality);
       renderer = createRenderer(device, format, simulation.volumes, quality);
+      renderer.setPlate(plate);
       simulation.clear();
       startBurst();
     } else {
@@ -201,8 +210,9 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     const scale = moving ? Math.max(quality.scaleMin, renderScale - ORBIT_SCALE_DROP) : renderScale;
     liveWidth = Math.max(1, Math.round(canvas.width * scale));
     liveHeight = Math.max(1, Math.round(canvas.height * scale));
+    if (plate?.source instanceof HTMLVideoElement && plate.source.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) renderer.writePlate(plate.source);
     renderer.draw(encoder, context.getCurrentTexture().createView(), {
-      camera: { eye: eye(), target, tanHalfFov: Math.tan(FOV / 2) },
+      camera: camera(),
       preset,
       blue: tweaks.blue,
       time: simTime,
@@ -330,25 +340,37 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       }
       syncSound();
     },
+    // The user's footage behind the fire, or none; the frame it is drawn in is the canvas.
+    setPlate(next: Plate | null) {
+      plate = next;
+      renderer.setPlate(plate);
+    },
+    setFraming(next: Framing) {
+      framing = next;
+      renderer.resetHistory();
+    },
     // Canvas pixel of a world point, or null behind the camera; and the floor point under a canvas pixel.
     project(point: Vec3): [number, number] | null {
-      const camera = { eye: eye(), target, tanHalfFov: Math.tan(FOV / 2) };
-      const { forward, right, up } = cameraBasis(camera);
-      const r = point.map((v, i) => v - camera.eye[i]) as Vec3;
+      const view = camera();
+      const { forward, right, up } = cameraBasis(view);
+      const r = point.map((v, i) => v - view.eye[i]) as Vec3;
       const z = dot(r, forward);
       if (z <= 0.01) return null;
       const aspect = canvas.clientWidth / canvas.clientHeight;
-      return [(0.5 + (0.5 * dot(r, right)) / (z * camera.tanHalfFov * aspect)) * canvas.clientWidth, (0.5 - (0.5 * dot(r, up)) / (z * camera.tanHalfFov)) * canvas.clientHeight];
+      return [
+        (0.5 + 0.5 * (dot(r, right) / (z * view.tanHalfFov * aspect) + framing.x)) * canvas.clientWidth,
+        (0.5 - 0.5 * (dot(r, up) / (z * view.tanHalfFov) + framing.y)) * canvas.clientHeight,
+      ];
     },
     floorPoint(x: number, y: number): Vec3 | null {
-      const camera = { eye: eye(), target, tanHalfFov: Math.tan(FOV / 2) };
-      const { forward, right, up } = cameraBasis(camera);
-      const sx = (2 * (x / canvas.clientWidth) - 1) * camera.tanHalfFov * (canvas.clientWidth / canvas.clientHeight);
-      const sy = (1 - 2 * (y / canvas.clientHeight)) * camera.tanHalfFov;
+      const view = camera();
+      const { forward, right, up } = cameraBasis(view);
+      const sx = (2 * (x / canvas.clientWidth) - 1 - framing.x) * view.tanHalfFov * (canvas.clientWidth / canvas.clientHeight);
+      const sy = (1 - 2 * (y / canvas.clientHeight) - framing.y) * view.tanHalfFov;
       const dir = forward.map((f, i) => f + right[i] * sx + up[i] * sy) as Vec3;
       if (dir[1] >= -1e-4) return null;
-      const t = -camera.eye[1] / dir[1];
-      return camera.eye.map((e, i) => e + dir[i] * t) as Vec3;
+      const t = -view.eye[1] / dir[1];
+      return view.eye.map((e, i) => e + dir[i] * t) as Vec3;
     },
     // Everything an export needs to be re-rendered later.
     snapshot() {
@@ -356,13 +378,16 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
         preset,
         tweaks: { ...tweaks },
         boxes: boxes.map((box) => ({ ...box })),
-        camera: { eye: eye(), target: [...target] as Vec3, tanHalfFov: Math.tan(FOV / 2) },
+        camera: { ...camera(), target: [...target] as Vec3 },
         orbit: { azimuth, polar, distance: ORBIT_DISTANCE, fovDegrees: (FOV * 180) / Math.PI },
+        framing: { ...framing },
+        plate: plate && { name: plate.name, width: plate.width, height: plate.height },
         grid: simulation.grid,
       };
     },
     // Pauses the live loop, restarts the simulation from nothing, on the job's grid if it names one, and renders the
-    // job frame by frame; the preview's grid comes back afterwards.
+    // job frame by frame; the preview's grid comes back afterwards. A job that composites the footage steps the
+    // plate through the clip a frame at a time, and the plate plays on when it is done.
     async render(job: OfflineJob, onFrame: (frame: RenderedFrame) => Promise<void>, signal: AbortSignal) {
       if (exporting) throw new Error('An export is already running.');
       exporting = true;
@@ -371,6 +396,15 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       syncSound();
       fps = stepsPerSecond = 0;
       const previewQuality = quality;
+      const footage = job.plate ? plate : null;
+      const video = footage?.source instanceof HTMLVideoElement ? footage.source : null;
+      video?.pause();
+      const showPlate = footage
+        ? async (seconds: number) => {
+            await seekPlate(footage, seconds);
+            renderer.writePlate(footage.source);
+          }
+        : undefined;
       const step = (dt: number) => {
         let encoder = device.createCommandEncoder();
         let pass = encoder.beginComputePass();
@@ -394,9 +428,10 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
         }
         simulation.clear();
         simTime = burstStart = 0;
-        await renderOffline({ device, context, canvas, simulation, renderer, preset, blue: tweaks.blue, step }, job, onFrame, signal);
+        await renderOffline({ device, context, canvas, simulation, renderer, preset, blue: tweaks.blue, step, showPlate }, job, onFrame, signal);
       } finally {
         exporting = false;
+        void video?.play();
         if (job.simulation) applyQuality(previewQuality);
         syncSound();
         stepsSince = stepCount;

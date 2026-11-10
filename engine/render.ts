@@ -1,4 +1,5 @@
-import { COMPOSITE, DISPLAY, RENDER, RESOLVE } from './render-shaders';
+import type { Plate } from './plate';
+import { COMPOSITE, DISPLAY, PRESENT, RENDER, RESOLVE } from './render-shaders';
 import { BOX_MAX, BOX_MIN, DENSITY, EXPOSURE, FIRE_LIGHT, FLOW_PERIOD, GRID, type Preset, type Quality } from './scene';
 import type { Volumes } from './simulation';
 import { createSparkRenderer } from './sparks';
@@ -18,7 +19,8 @@ const BAND_PIXELS = 1.5 * 2 ** 20;
 
 export type Vec3 = [number, number, number];
 
-export type Camera = { eye: Vec3; target: Vec3; tanHalfFov: number };
+// shift slides the picture across the frame, in half-frames to the right and up, without turning the view.
+export type Camera = { eye: Vec3; target: Vec3; tanHalfFov: number; shift?: [number, number] };
 
 export type Frame = {
   camera: Camera;
@@ -90,9 +92,13 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   const renderModule = device.createShaderModule({ code: RENDER });
   const raymarch = pipeline(renderModule, 'fs', [{ format: TARGET_FORMAT }]);
   const resolve = fullscreen(RESOLVE, TARGET_FORMAT);
+  const present = fullscreen(PRESENT, format);
   const composite = fullscreen(COMPOSITE, format);
   // The same bilinear pass into a float target, to carry the history over to a new target size.
   const resample = fullscreen(COMPOSITE, TARGET_FORMAT);
+  // The footage behind the fire, read as linear light; one clear texel until a plate is loaded.
+  const noPlate = device.createTexture({ size: [1, 1], format: 'rgba8unorm-srgb', usage: GPUTextureUsage.TEXTURE_BINDING });
+  let plate = noPlate;
 
   const viewBuffer = device.createBuffer({ size: VIEW_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const blendBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -122,7 +128,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     return exportPipelines;
   }
 
-  type Targets = { width: number; height: number; current: GPUTexture; history: GPUTexture[]; resolveGroups: GPUBindGroup[]; compositeGroups: GPUBindGroup[]; resampleGroups: GPUBindGroup[] };
+  type Targets = { width: number; height: number; current: GPUTexture; history: GPUTexture[]; resolveGroups: GPUBindGroup[]; presentGroups: GPUBindGroup[]; resampleGroups: GPUBindGroup[] };
   let targets: Targets | null = null;
   // Targets of the old size, destroyed once the frame that resampled them has been submitted.
   let retired: Targets | null = null;
@@ -154,12 +160,13 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
           ],
         }),
       ),
-      compositeGroups: views.map((view) =>
+      presentGroups: views.map((view) =>
         device.createBindGroup({
-          layout: composite.getBindGroupLayout(0),
+          layout: present.getBindGroupLayout(0),
           entries: [
             { binding: 0, resource: view },
             { binding: 1, resource: volumes.sampler },
+            { binding: 2, resource: plate.createView() },
           ],
         }),
       ),
@@ -216,7 +223,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
       -jitter[0], -jitter[1], width, height,
       maxSteps, FIRE_LIGHT, frame, preset.fireDensity,
       preset.detail, flowWeight, sampleWeight, blue,
-      timeOffset, 0, 0, 0,
+      timeOffset, 0, ...(camera.shift ?? [0, 0]),
     ]);
     device.queue.writeBuffer(viewBuffer, 0, viewData);
   }
@@ -237,7 +244,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     // The previous frame's command buffer, which may have read the retired targets, has been submitted by now.
     destroyTargets(retired);
     retired = null;
-    const { current, history, resolveGroups, compositeGroups } = ensureTargets(encoder, frame.width, frame.height);
+    const { current, history, resolveGroups, presentGroups } = ensureTargets(encoder, frame.width, frame.height);
     writeView({ ...frame, jitter: [0, 0], frame: frame.index, stepCells: live.stepCells, maxSteps: live.maxSteps, sampleWeight: 1, frameTime: 0, timeOffset: 0 });
     device.queue.writeBuffer(blendBuffer, 0, new Float32Array([historyValid ? frame.blend : 1]));
     const next = 1 - historyIndex;
@@ -245,13 +252,35 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     // Sparks go on after the temporal blend: it would dim a streak that moves every frame, and the next resolve
     // clamps them out of the history, so they never ghost.
     fullscreenPass(encoder, history[next].createView(), resolve, resolveGroups[historyIndex], frame.timestamps.taa, (pass) => sparks.draw(pass, frame.scalarIndex));
-    fullscreenPass(encoder, canvasView, composite, compositeGroups[next], frame.timestamps.composite);
+    fullscreenPass(encoder, canvasView, present, presentGroups[next], frame.timestamps.composite);
     historyIndex = next;
     historyValid = true;
   }
 
-  // The light groups and the data target, the tonemapped display frame, and the groups that read them.
-  function createExportTargets(width: number, height: number) {
+  // A new plate, or none: the live targets go with the old one, since their bind groups hold it.
+  function setPlate(next: Plate | null) {
+    if (plate !== noPlate) plate.destroy();
+    plate = noPlate;
+    if (next) {
+      plate = device.createTexture({
+        size: [next.width, next.height],
+        format: 'rgba8unorm-srgb',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      writePlate(next.source);
+    }
+    disposeTargets();
+    historyValid = false;
+  }
+
+  // The plate's current frame; a video is copied again whenever it has moved on.
+  function writePlate(source: Plate['source']) {
+    device.queue.copyExternalImageToTexture({ source }, { texture: plate }, [plate.width, plate.height]);
+  }
+
+  // The light groups and the data target, the tonemapped display frame, and the groups that read them. The display
+  // frame is laid over the footage plate only when the export composites it.
+  function createExportTargets(width: number, height: number, overPlate: boolean) {
     const { display: displayPipeline } = exportResources();
     const make = () =>
       device.createTexture({ size: [width, height], format: TARGET_FORMAT, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
@@ -264,7 +293,10 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
       display,
       displayGroup: device.createBindGroup({
         layout: displayPipeline.getBindGroupLayout(0),
-        entries: [layers.fire, layers.firelight, layers.smoke].map((layer, binding) => ({ binding, resource: layer.createView() })),
+        entries: [
+          ...[layers.fire, layers.firelight, layers.smoke, overPlate ? plate : noPlate].map((texture, binding) => ({ binding, resource: texture.createView() })),
+          { binding: 4, resource: volumes.sampler },
+        ],
       }),
       previewGroup: device.createBindGroup({
         layout: composite.getBindGroupLayout(0),
@@ -329,6 +361,8 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
 
   return {
     draw,
+    setPlate,
+    writePlate,
     createExportTargets,
     drawExportSample,
     drawDisplay,
@@ -342,6 +376,8 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     dispose() {
       disposeTargets();
       sparks.dispose();
+      if (plate !== noPlate) plate.destroy();
+      noPlate.destroy();
       viewBuffer.destroy();
       blendBuffer.destroy();
     },

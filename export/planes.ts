@@ -101,7 +101,8 @@ export function cameraMatrices(camera: Camera, aspect: number) {
   const e = camera.eye;
   const t = camera.tanHalfFov;
   const worldToCamera = [r[0], u[0], f[0], 0, r[1], u[1], f[1], 0, r[2], u[2], f[2], 0, -dot(r, e), -dot(u, e), -dot(f, e), 1];
-  const projection = [0.5 / (t * aspect), 0, 0, 0, 0, -0.5 / t, 0, 0, 0.5, 0.5, 0, 1, 0, 0, 1, 0];
+  const [shiftX, shiftY] = camera.shift ?? [0, 0];
+  const projection = [0.5 / (t * aspect), 0, 0, 0, 0, -0.5 / t, 0, 0, 0.5 + 0.5 * shiftX, 0.5 - 0.5 * shiftY, 0, 1, 0, 0, 1, 0];
   const worldToNDC = Array.from({ length: 16 }, (_, i) => [0, 1, 2, 3].reduce((sum, k) => sum + worldToCamera[(i >> 2) * 4 + k] * projection[k * 4 + (i & 3)], 0));
   return { worldToCamera, worldToNDC };
 }

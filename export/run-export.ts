@@ -9,13 +9,21 @@ import { createMp4Sink } from './mp4';
 import { cameraMatrices, toExrChannels, toRgba } from './planes';
 import { encodePng } from './png';
 
-// Seconds simulated before the first frame, so a fire has risen and settled; an explosion starts at its charge.
-const WARMUP = 3;
+// Seconds simulated before the first frame, so a fire has risen and its smoke column has reached the top of the
+// box; an explosion starts at its charge.
+const WARMUP = 6;
 const FLIPBOOK_FOV = 20;
 // A sheet simulates at 60 fps and keeps every stride-th frame, so its cells span the clip at whatever playback rate that gives.
 const FLIPBOOK_FPS = 60;
 
 export const SIZES = ['1280x720', '1920x1080', '2560x1440', '3840x2160', '4096x2160', '1080x1080', '1080x1920'] as const;
+const MAX_FOOTAGE_SIDE = 4096;
+
+// With footage loaded the frame is the footage's own, shrunk to fit 4096 pixels and made even for the video encoder.
+export function footageSize({ width, height }: { width: number; height: number }) {
+  const scale = Math.min(1, MAX_FOOTAGE_SIDE / Math.max(width, height));
+  return [width, height].map((side) => 2 * Math.round((side * scale) / 2));
+}
 
 export type ExportSettings = {
   mode: 'sequence' | 'flipbook' | 'video';
@@ -32,6 +40,8 @@ export type ExportSettings = {
   shutter: 0 | 0.5;
   samples: 4 | 16 | 32 | 64;
   loop: boolean;
+  // With footage loaded: the fire laid over it, or the fire alone on the footage's frame.
+  footage: 'composite' | 'off';
 };
 
 export const DEFAULT_SETTINGS: ExportSettings = {
@@ -48,6 +58,7 @@ export const DEFAULT_SETTINGS: ExportSettings = {
   shutter: 0.5,
   samples: 16,
   loop: false,
+  footage: 'composite',
 };
 
 export type Progress = { done: number; total: number; msPerFrame: number };
@@ -74,7 +85,8 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
   const flipbook = settings.mode === 'flipbook';
   const exr = settings.mode === 'sequence' && settings.format === 'exr';
   const { cols, rows, cells, stride } = flipbookTiming(settings);
-  const [width, height] = flipbook ? [settings.cell, settings.cell] : settings.size.split('x').map(Number);
+  const footage = flipbook ? null : snapshot.plate;
+  const [width, height] = flipbook ? [settings.cell, settings.cell] : footage ? footageSize(footage) : settings.size.split('x').map(Number);
   const job: OfflineJob = {
     width,
     height,
@@ -88,6 +100,7 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
     read: exr ? ['fire', 'firelight', 'smoke', 'data'] : flipbook && settings.motion !== 'off' ? ['display', 'data'] : ['display'],
     shutter: settings.shutter,
     simulation: RENDER_GRID,
+    plate: Boolean(footage) && !exr && settings.footage === 'composite',
   };
   onProgress({ done: 0, total: job.frames, msPerFrame: 0 });
   // The clock starts at the first delivered frame, so the warm-up does not inflate the estimate.
@@ -124,7 +137,7 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
 }
 
 // Every input the job had, so the same frames can be rendered again.
-function sidecarFor({ preset, tweaks, boxes, orbit, grid: previewGrid }: ReturnType<Engine['snapshot']>, settings: ExportSettings, job: OfflineJob) {
+function sidecarFor({ preset, tweaks, boxes, orbit, framing, plate, grid: previewGrid }: ReturnType<Engine['snapshot']>, settings: ExportSettings, job: OfflineJob) {
   const exr = settings.mode === 'sequence' && settings.format === 'exr';
   const flipbook = settings.mode === 'flipbook';
   const [cols, rows] = settings.grid.split('x').map(Number);
@@ -136,7 +149,8 @@ function sidecarFor({ preset, tweaks, boxes, orbit, grid: previewGrid }: ReturnT
     preset,
     tweaks,
     boxes,
-    camera: { ...job.camera, orbit },
+    camera: { ...job.camera, orbit, ...(!flipbook && { framing }) },
+    ...(plate && !flipbook && { footage: { ...plate, composited: Boolean(job.plate) } }),
     render: {
       width: job.width,
       height: job.height,
@@ -158,7 +172,7 @@ function sidecarFor({ preset, tweaks, boxes, orbit, grid: previewGrid }: ReturnT
         ...(overlap > 0 && { note: 'during the crossfade the flame detail phase and the motion vectors follow the live state, not the blend' }),
       },
     },
-    output: outputNotes(settings, exr),
+    output: outputNotes(settings, exr, Boolean(job.plate)),
     ...(flipbook && {
       flipbook: {
         cols,
@@ -187,7 +201,7 @@ function sidecarFor({ preset, tweaks, boxes, orbit, grid: previewGrid }: ReturnT
   };
 }
 
-function outputNotes(settings: ExportSettings, exr: boolean) {
+function outputNotes(settings: ExportSettings, exr: boolean, composited: boolean) {
   if (exr) {
     return {
       mode: settings.mode,
@@ -195,13 +209,14 @@ function outputNotes(settings: ExportSettings, exr: boolean) {
       colour: 'scene-linear Rec.709/D65, premultiplied; RGB = fire + firelight + smoke; Z planar camera depth, far 1e10; forward.u/v pixels per frame, +v up; temperature in simulation units',
     };
   }
-  if (settings.mode === 'video') return { mode: 'video', format: 'mp4', colour: 'H.264 4:2:0 BT.709 limited range of the sRGB display image over black' };
+  const over = composited ? 'the footage, composited in linear light' : 'black';
+  if (settings.mode === 'video') return { mode: 'video', format: 'mp4', colour: `H.264 4:2:0 BT.709 limited range of the sRGB display image over ${over}` };
   return {
     mode: settings.mode,
     format: 'png',
     alpha: settings.alpha,
     bits: settings.mode === 'sequence' ? settings.bits : 8,
-    colour: `sRGB-encoded display image (ACES fit), alpha ${settings.alpha}`,
+    colour: composited ? `sRGB-encoded display image (ACES fit) over ${over}, opaque` : `sRGB-encoded display image (ACES fit), alpha ${settings.alpha}`,
     ...(settings.alpha === 'straight' && { note: 'alpha raised to max(rgb) so emissive flame survives' }),
   };
 }
@@ -223,7 +238,7 @@ function exrSink(destination: Destination, id: string, job: OfflineJob, comments
   };
 }
 
-// The premultiplied display colour is the picture over black, so the alpha byte is simply ignored.
+// The premultiplied display colour is the picture over black, or over the footage, so the alpha byte is simply ignored.
 async function videoSink(destination: Destination, id: string, job: OfflineJob): Promise<Sink> {
   const mp4 = await createMp4Sink(destination, `${id}.mp4`, job.width, job.height, job.fps);
   return { frame: (frame) => mp4.frame(toRgba(frame, 8, false), frame.index), finish: mp4.finish, abort: mp4.abort };

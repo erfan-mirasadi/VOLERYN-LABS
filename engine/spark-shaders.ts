@@ -188,7 +188,10 @@ struct View {
   detail: f32,
   flowWeight: f32,
   sampleWeight: f32,
+  blue: f32,
+  timeOffset: f32,
   pad: f32,
+  shift: vec2<f32>,
 }
 @group(0) @binding(0) var<uniform> V: View;
 ` + PARAMS_STRUCT + /* wgsl */ `
@@ -221,7 +224,8 @@ fn hash(i: u32, k: f32) -> f32 { return fract(sin(f32(i % 4096u) * 12.9898 + k *
 fn toPixel(p: vec3<f32>) -> vec2<f32> {
   let r = p - V.camPos;
   let z = dot(r, V.forward);
-  return vec2<f32>(0.5 + 0.5 * dot(r, V.right) / (z * V.tanHalf * V.aspect), 0.5 - 0.5 * dot(r, V.up) / (z * V.tanHalf)) * V.viewport.zw + V.viewport.xy;
+  let ndc = vec2<f32>(dot(r, V.right) / (z * V.tanHalf * V.aspect), dot(r, V.up) / (z * V.tanHalf)) + V.shift;
+  return vec2<f32>(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y) * V.viewport.zw + V.viewport.xy;
 }
 // The flame's opaque core; its warm fringe and the plume above glow but let a spark show through.
 fn core(t: f32) -> f32 { return smoothstep(0.6, 1.2, t); }

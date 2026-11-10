@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import type { Engine } from '@/engine/engine';
+import type { Engine, Framing } from '@/engine/engine';
+import { type Plate, releasePlate } from '@/engine/plate';
 import { QUALITIES, type QualityId, type Tweaks } from '@/engine/scene';
 import { presetById, PRESETS } from '@/presets/presets';
 
@@ -12,6 +13,8 @@ type StudioState = {
   presetId: string;
   tweaks: Tweaks;
   backdrop: Backdrop;
+  plate: Plate | null;
+  framing: Framing;
   quality: QualityId;
   exporting: boolean;
   sound: boolean;
@@ -21,9 +24,13 @@ type StudioState = {
   setTweak: (key: keyof Tweaks, value: number) => void;
   addCube: () => void;
   setBackdrop: (backdrop: Backdrop) => void;
+  setPlate: (plate: Plate | null) => void;
+  setFraming: (patch: Partial<Framing>) => void;
   setExporting: (exporting: boolean) => void;
   toggleSound: () => void;
 };
+
+const CENTRED: Framing = { x: 0, y: 0, scale: 1 };
 
 export const useStudioStore = create<StudioState>()((set, get) => ({
   engine: null,
@@ -31,11 +38,15 @@ export const useStudioStore = create<StudioState>()((set, get) => ({
   presetId: PRESETS[0].id,
   tweaks: { heat: 1, vorticity: PRESETS[0].vorticity, wind: 0, windYaw: 0, seed: 0, blue: PRESETS[0].blue, sparks: PRESETS[0].sparks, smoke: 1, width: 1 },
   backdrop: 'checker',
+  plate: null,
+  framing: CENTRED,
   quality: 'balanced',
   exporting: false,
   sound: false,
   setEngine: (engine, status) => {
     engine?.setQuality(QUALITIES[get().quality]);
+    engine?.setPlate(get().plate);
+    engine?.setFraming(get().framing);
     set({ engine, status, sound: false });
   },
   setQuality: (quality) => {
@@ -64,6 +75,19 @@ export const useStudioStore = create<StudioState>()((set, get) => ({
     });
   },
   setBackdrop: (backdrop) => set({ backdrop }),
+  // Taking the footage away puts the fire back in the middle of the frame.
+  setPlate: (plate) => {
+    const { engine, plate: old, framing } = get();
+    engine?.setPlate(plate);
+    if (old) releasePlate(old);
+    set({ plate });
+    if (!plate && framing !== CENTRED) get().setFraming(CENTRED);
+  },
+  setFraming: (patch) => {
+    const framing = { ...get().framing, ...patch };
+    get().engine?.setFraming(framing);
+    set({ framing });
+  },
   setExporting: (exporting) => set({ exporting }),
   toggleSound: () => {
     const sound = !get().sound;

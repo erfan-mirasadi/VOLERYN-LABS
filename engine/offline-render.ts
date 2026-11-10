@@ -32,6 +32,8 @@ export type OfflineJob = {
   shutter: number;
   // The grid to simulate on; without one the engine renders on the grid it is showing.
   simulation?: SimulationGrid;
+  // Lays the display frame over the loaded footage; the light groups stay the fire's own.
+  plate?: boolean;
 };
 
 // Raw rgba16float texels, four halves per pixel, row y starting at y * stride halves.
@@ -53,6 +55,8 @@ export type OfflineContext = {
   blue: number;
   // Runs one simulation step and returns the simulation time after it.
   step: (dt: number) => number;
+  // Puts the footage plate on its frame for a clip time, when the job composites one.
+  showPlate?: (seconds: number) => Promise<void>;
 };
 
 export function halton(index: number, base: number) {
@@ -162,7 +166,7 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
   const slotBytes = job.read.length * planeBytes;
   const slots = slotBytes > SINGLE_SLOT_BYTES ? 1 : 2;
   device.pushErrorScope('out-of-memory');
-  const targets = renderer.createExportTargets(job.width, job.height);
+  const targets = renderer.createExportTargets(job.width, job.height, Boolean(ctx.showPlate));
   const staging = Array.from({ length: slots }, () => device.createBuffer({ size: slotBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
   if (await device.popErrorScope()) {
     targets.destroy();
@@ -214,6 +218,7 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
       }
       const slot = j % slots;
       await busy[slot];
+      await ctx.showPlate?.((j * job.stride) / job.fps);
       const buffer = staging[slot];
       const encoder = device.createCommandEncoder();
       renderer.drawDisplay(encoder, targets);

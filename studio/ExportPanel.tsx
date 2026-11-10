@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react';
 import { openDestination } from '@/export/files';
-import { DEFAULT_SETTINGS, type ExportSettings, flipbookTiming, folderName, type Progress, runExport, SIZES } from '@/export/run-export';
+import { DEFAULT_SETTINGS, type ExportSettings, flipbookTiming, folderName, footageSize, type Progress, runExport, SIZES } from '@/export/run-export';
 import { presetById } from '@/presets/presets';
 import { chip } from './SimulationPanel';
 import { useStudioStore } from './useStudioStore';
@@ -13,7 +13,7 @@ type Row = {
   label: string;
   options: [value: string | number, label: string][];
   modes: Mode[];
-  hidden?: (settings: ExportSettings) => boolean;
+  hidden?: (settings: ExportSettings, footage: boolean) => boolean;
 };
 
 const MODES: [Mode, string][] = [['sequence', 'Sequence'], ['flipbook', 'Flipbook'], ['video', 'Video']];
@@ -22,7 +22,8 @@ const ROWS: Row[] = [
   { key: 'format', label: 'Format', options: [['png', 'PNG'], ['exr', 'EXR']], modes: ['sequence'] },
   { key: 'alpha', label: 'Alpha', options: [['premultiplied', 'Premultiplied'], ['straight', 'Straight']], modes: ['sequence', 'flipbook'], hidden: (s) => s.format === 'exr' },
   { key: 'bits', label: 'Bits', options: [[8, '8-bit'], [16, '16-bit']], modes: ['sequence'], hidden: (s) => s.format === 'exr' },
-  { key: 'size', label: 'Size', options: SIZES.map((size) => [size, size.replace('x', ' × ')]), modes: ['sequence', 'video'] },
+  { key: 'footage', label: 'Footage', options: [['composite', 'Composited'], ['off', 'Fire only']], modes: ['sequence', 'video'], hidden: (s, footage) => !footage || (s.mode === 'sequence' && s.format === 'exr') },
+  { key: 'size', label: 'Size', options: SIZES.map((size) => [size, size.replace('x', ' × ')]), modes: ['sequence', 'video'], hidden: (_, footage) => footage },
   { key: 'fps', label: 'Frame rate', options: [24, 25, 30, 60].map((fps) => [fps, `${fps} fps`]), modes: ['sequence', 'video'] },
   { key: 'seconds', label: 'Length', options: [2, 5, 10, 20].map((seconds) => [seconds, `${seconds} s`]), modes: ALL },
   { key: 'grid', label: 'Grid', options: [['4x4', '4 × 4'], ['8x4', '8 × 4'], ['8x8', '8 × 8']], modes: ['flipbook'] },
@@ -38,14 +39,14 @@ const clock = (ms: number) => {
 };
 
 export default function ExportPanel() {
-  const { engine, status, exporting, presetId, tweaks, setExporting } = useStudioStore();
+  const { engine, status, exporting, presetId, tweaks, plate, setExporting } = useStudioStore();
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
   const explosion = presetById(presetId).mode === 'explosion';
   const set = (patch: Partial<ExportSettings>) => setSettings((current) => ({ ...current, ...patch }));
-  const rows = ROWS.filter((row) => row.modes.includes(settings.mode) && !row.hidden?.(settings));
+  const rows = ROWS.filter((row) => row.modes.includes(settings.mode) && !row.hidden?.(settings, Boolean(plate)));
   const sheet = settings.mode === 'flipbook' ? flipbookTiming(settings) : null;
 
   async function render() {
@@ -103,6 +104,7 @@ export default function ExportPanel() {
             </select>
           </label>
         ))}
+        {plate && !sheet && <p className="col-span-2 font-mono text-xs tabular-nums text-muted">{footageSize(plate).join(' × ')}, the footage’s frame</p>}
         {sheet && (
           <p className="col-span-2 font-mono text-xs tabular-nums text-muted">
             {sheet.cells} cells · {sheet.seconds.toFixed(1)} s · {+sheet.fps.toFixed(2)} fps playback

@@ -15,11 +15,19 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 // colour down to it keeps the hue. Mostly the first with some of the second: the core still brightens towards
 // white where it is hottest, but keeps its yellow and the detail in it on the way there.
 export const TONEMAP = /* wgsl */ `
+fn encode(m: vec3<f32>) -> vec3<f32> { return select(1.055 * pow(m, vec3<f32>(1.0 / 2.4)) - 0.055, 12.92 * m, m <= vec3<f32>(0.0031308)); }
+fn decode(c: vec3<f32>) -> vec3<f32> { return select(pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045)); }
 fn aces(c: vec3<f32>) -> vec3<f32> { return clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0)); }
 fn tonemap(c: vec3<f32>) -> vec3<f32> {
   let peak = max(max(c.r, c.g), max(c.b, 1e-4));
-  let m = mix(aces(c), c / peak * aces(vec3<f32>(peak)).x, 0.3);
-  return select(1.055 * pow(m, vec3<f32>(1.0 / 2.4)) - 0.055, 12.92 * m, m <= vec3<f32>(0.0031308));
+  return encode(mix(aces(c), c / peak * aces(vec3<f32>(peak)).x, 0.3));
+}
+// A premultiplied display frame over the footage plate. The two meet in linear light, where a flame adds to what is
+// behind it and smoke takes away its share: the frame is decoded, laid over the plate by its alpha and encoded again.
+// With no plate loaded the plate is one clear texel and the frame comes back as it went in.
+fn over(frame: vec4<f32>, plate: vec4<f32>) -> vec4<f32> {
+  let behind = plate.a * (1.0 - frame.a);
+  return vec4<f32>(encode(decode(frame.rgb) + plate.rgb * behind), frame.a + behind);
 }`;
 
 export const RENDER = BLACKBODY + TONEMAP + /* wgsl */ `
@@ -59,9 +67,8 @@ struct View {
   sampleWeight: f32,
   blue: f32,
   timeOffset: f32,
-  pad0: f32,
-  pad1: f32,
-  pad2: f32,
+  pad: f32,
+  shift: vec2<f32>,
 }
 @group(0) @binding(0) var<uniform> V: View;
 @group(0) @binding(1) var sca: texture_3d<f32>;
@@ -115,7 +122,8 @@ struct March {
 fn march(frag: vec2<f32>) -> March {
   var m: March;
   let local = (frag - V.viewport.xy) / V.viewport.zw;
-  let ndc = vec2<f32>(local.x * 2.0 - 1.0, 1.0 - local.y * 2.0);
+  // The lens shift slides the picture across the frame without turning the view.
+  let ndc = vec2<f32>(local.x * 2.0 - 1.0, 1.0 - local.y * 2.0) - V.shift;
   let dir = normalize(V.forward + ndc.x * V.aspect * V.tanHalf * V.right + ndc.y * V.tanHalf * V.up);
   m.dir = dir;
   let inv = 1.0 / dir;
@@ -271,7 +279,8 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 fn toPixel(p: vec3<f32>) -> vec2<f32> {
   let r = p - V.camPos;
   let z = dot(r, V.forward);
-  return vec2<f32>(0.5 + 0.5 * dot(r, V.right) / (z * V.tanHalf * V.aspect), 0.5 - 0.5 * dot(r, V.up) / (z * V.tanHalf)) * V.viewport.zw;
+  let ndc = vec2<f32>(dot(r, V.right) / (z * V.tanHalf * V.aspect), dot(r, V.up) / (z * V.tanHalf)) + V.shift;
+  return vec2<f32>(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y) * V.viewport.zw;
 }
 
 // The light groups as linear premultiplied colour, plus temperature in firelight.a and a data target holding the
@@ -297,17 +306,21 @@ fn fsExport(@builtin(position) frag: vec4<f32>) -> ExportOut {
   return ExportOut(vec4<f32>(m.fire, m.alpha) * w, vec4<f32>(m.firelight, m.heat) * w, vec4<f32>(m.smoke, 0.0) * w, data * w);
 }`;
 
-// The accumulated light groups through the same tonemap as the live view: what a PNG or MP4 frame holds.
+// The accumulated light groups through the same tonemap as the live view, over the footage plate when the export
+// composites one: what a PNG or MP4 frame holds.
 export const DISPLAY = TONEMAP + /* wgsl */ `
 @group(0) @binding(0) var fire: texture_2d<f32>;
 @group(0) @binding(1) var firelight: texture_2d<f32>;
 @group(0) @binding(2) var smoke: texture_2d<f32>;
+@group(0) @binding(3) var plate: texture_2d<f32>;
+@group(0) @binding(4) var lin: sampler;
 ` + FULLSCREEN_VS + /* wgsl */ `
 @fragment
 fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let p = vec2<i32>(frag.xy);
   let f = textureLoad(fire, p, 0);
-  return vec4<f32>(tonemap(f.rgb + textureLoad(firelight, p, 0).rgb + textureLoad(smoke, p, 0).rgb), f.a);
+  let frame = vec4<f32>(tonemap(f.rgb + textureLoad(firelight, p, 0).rgb + textureLoad(smoke, p, 0).rgb), f.a);
+  return over(frame, textureSampleLevel(plate, lin, frag.xy / vec2<f32>(textureDimensions(fire)), 0.0));
 }`;
 
 // Temporal blend of the jittered raymarch with the last frame, the history clamped to the current neighbourhood so it cannot ghost.
@@ -335,18 +348,30 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   return mix(old, now, T.blend);
 }`;
 
-// Bilinear upsample of the resolved frame onto the canvas.
-export const COMPOSITE = /* wgsl */ `
-@group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var lin: sampler;
+const UV_VS = /* wgsl */ `
 struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> }
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> Out {
   var corners = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
   let c = corners[i];
   return Out(vec4<f32>(c, 0.0, 1.0), vec2<f32>(0.5 * (c.x + 1.0), 0.5 * (1.0 - c.y)));
-}
+}`;
+
+// Bilinear resample of a frame into another size.
+export const COMPOSITE = UV_VS + /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var lin: sampler;
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
   return textureSampleLevel(src, lin, in.uv, 0.0);
+}`;
+
+// The resolved live frame upsampled onto the canvas, over the footage plate.
+export const PRESENT = TONEMAP + UV_VS + /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var lin: sampler;
+@group(0) @binding(2) var plate: texture_2d<f32>;
+@fragment
+fn fs(in: Out) -> @location(0) vec4<f32> {
+  return over(textureSampleLevel(src, lin, in.uv, 0.0), textureSampleLevel(plate, lin, in.uv, 0.0));
 }`;

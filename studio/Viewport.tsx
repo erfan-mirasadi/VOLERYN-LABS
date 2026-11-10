@@ -20,16 +20,20 @@ const STATUS_MESSAGE = {
 };
 
 export default function Viewport() {
-  const { backdrop, status, presetId, sound, setEngine, toggleSound } = useStudioStore();
+  const { backdrop, plate, status, presetId, sound, setEngine, toggleSound } = useStudioStore();
   const message = STATUS_MESSAGE[status];
+  // With footage loaded the canvas is the footage's frame, as large as fits; otherwise it fills the viewport.
+  const frame = plate && { aspectRatio: `${plate.width} / ${plate.height}`, width: `min(100cqw, 100cqh * ${plate.width / plate.height})` };
 
   return (
-    <div className={`relative min-h-[60vh] flex-1 overflow-hidden ${BACKDROP_CLASS[backdrop]}`}>
-      <FireCanvas preset={presetById(presetId)} onEngine={setEngine} label="Fire simulation; drag to orbit" />
+    <div className={`relative grid min-h-[60vh] flex-1 place-items-center overflow-hidden [container-type:size] ${BACKDROP_CLASS[backdrop]}`}>
+      <div className={`relative ${frame ? '' : 'size-full'}`} style={frame ?? undefined}>
+        <FireCanvas preset={presetById(presetId)} onEngine={setEngine} label="Fire simulation; drag to orbit" />
+        {status === 'ready' && <WindGizmo />}
+      </div>
       <div className="absolute left-3 top-3">
         <TimingHud />
       </div>
-      {status === 'ready' && <WindGizmo />}
       {status === 'ready' && (
         <button
           type="button"
