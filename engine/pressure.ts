@@ -3,7 +3,7 @@ import { COARSEN, MASK, PROLONGATE, RESTRICT, SMOOTH } from './pressure-shaders'
 
 const CYCLES = 2;
 const SWEEPS = 2;
-const COARSE_SWEEPS = 8;
+const COARSE_SWEEPS = 16;
 const COARSEST = 4;
 
 type Dispatch = { pipeline: GPUComputePipeline; group: GPUBindGroup; workgroups: [number, number, number] };

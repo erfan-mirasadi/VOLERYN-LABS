@@ -1,6 +1,9 @@
 import { HEADER } from './simulation-shaders';
 
-// The seven-point Laplacian with the top open: the ghost above the lid holds zero pressure, any other missing neighbour drops out.
+// The seven-point Laplacian with the top open: pressure is zero on the lid itself, so the ghost above it mirrors the
+// cell below with the sign turned, which counts twice on the diagonal; any other missing neighbour drops out. Zero
+// in the ghost's centre instead would put the open boundary half a cell higher on every coarser level, and with
+// seven levels the coarse corrections then overshoot and the solve diverges.
 // Every shader binds the level's pressure as "pressure" and its solid mask as "solid".
 const STENCIL = /* wgsl */ `
 const X = vec3<i32>(1, 0, 0);
@@ -8,7 +11,7 @@ const Y = vec3<i32>(0, 1, 0);
 const Z = vec3<i32>(0, 0, 1);
 fn solidAt(c: vec3<i32>) -> bool { return textureLoad(solid, c, 0).x > 0.5; }
 fn neighbour(c: vec3<i32>, n: vec3<i32>) -> vec2<f32> {
-  if (c.y >= n.y) { return vec2<f32>(0.0, 1.0); }
+  if (c.y >= n.y) { return vec2<f32>(0.0, 2.0); }
   if (any(c < vec3<i32>(0)) || any(c >= n) || solidAt(c)) { return vec2<f32>(0.0); }
   return vec2<f32>(textureLoad(pressure, c).x, 1.0);
 }
@@ -72,10 +75,11 @@ const Y = vec3<i32>(0, 1, 0);
 const Z = vec3<i32>(0, 0, 1);
 @group(0) @binding(0) var coarse: texture_3d<f32>;
 @group(0) @binding(1) var pressure: texture_storage_3d<r32float, read_write>;
-// Above the lid the correction is zero, like the pressure; at the walls it continues flat.
+// Above the lid the correction mirrors with its sign turned, so it crosses zero on the lid like the pressure; at the
+// walls it continues flat.
 fn tap(c: vec3<i32>, n: vec3<i32>) -> f32 {
-  if (c.y >= n.y) { return 0.0; }
-  return textureLoad(coarse, clamp(c, vec3<i32>(0), n - vec3<i32>(1)), 0).x;
+  let value = textureLoad(coarse, clamp(c, vec3<i32>(0), n - vec3<i32>(1)), 0).x;
+  return select(value, -value, c.y >= n.y);
 }
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
