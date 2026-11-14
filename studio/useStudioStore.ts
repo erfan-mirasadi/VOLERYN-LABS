@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import type { Engine, Framing } from '@/engine/engine';
+import type { DepthEstimator } from '@/engine/depth';
+import type { Engine, Framing, Occlusion } from '@/engine/engine';
 import { type Plate, releasePlate } from '@/engine/plate';
 import { QUALITIES, type QualityId, type Tweaks } from '@/engine/scene';
 import { presetById, PRESETS } from '@/presets/presets';
@@ -15,6 +16,11 @@ type StudioState = {
   backdrop: Backdrop;
   plate: Plate | null;
   framing: Framing;
+  // The footage's depth is on while this holds the estimator.
+  depthEstimator: DepthEstimator | null;
+  occlusion: Occlusion;
+  // The next click on the footage sets the fire's depth to the spot clicked.
+  picking: boolean;
   quality: QualityId;
   exporting: boolean;
   sound: boolean;
@@ -26,6 +32,9 @@ type StudioState = {
   setBackdrop: (backdrop: Backdrop) => void;
   setPlate: (plate: Plate | null) => void;
   setFraming: (patch: Partial<Framing>) => void;
+  setDepthEstimator: (estimator: DepthEstimator | null) => Promise<void>;
+  setOcclusion: (patch: Partial<Occlusion>) => void;
+  setPicking: (picking: boolean) => void;
   setExporting: (exporting: boolean) => void;
   toggleSound: () => void;
 };
@@ -40,13 +49,18 @@ export const useStudioStore = create<StudioState>()((set, get) => ({
   backdrop: 'checker',
   plate: null,
   framing: CENTRED,
+  depthEstimator: null,
+  occlusion: { depth: 0.5, show: false },
+  picking: false,
   quality: 'balanced',
   exporting: false,
   sound: false,
   setEngine: (engine, status) => {
     engine?.setQuality(QUALITIES[get().quality]);
-    engine?.setPlate(get().plate);
     engine?.setFraming(get().framing);
+    engine?.setOcclusion(get().occlusion);
+    void engine?.setPlate(get().plate);
+    void engine?.setDepth(get().depthEstimator);
     set({ engine, status, sound: false });
   },
   setQuality: (quality) => {
@@ -78,9 +92,9 @@ export const useStudioStore = create<StudioState>()((set, get) => ({
   // Taking the footage away puts the fire back in the middle of the frame.
   setPlate: (plate) => {
     const { engine, plate: old, framing } = get();
-    engine?.setPlate(plate);
+    void engine?.setPlate(plate);
     if (old) releasePlate(old);
-    set({ plate });
+    set({ plate, picking: false });
     if (!plate && framing !== CENTRED) get().setFraming(CENTRED);
   },
   setFraming: (patch) => {
@@ -88,6 +102,16 @@ export const useStudioStore = create<StudioState>()((set, get) => ({
     get().engine?.setFraming(framing);
     set({ framing });
   },
+  setDepthEstimator: async (depthEstimator) => {
+    set({ depthEstimator, picking: false });
+    await get().engine?.setDepth(depthEstimator);
+  },
+  setOcclusion: (patch) => {
+    const occlusion = { ...get().occlusion, ...patch };
+    get().engine?.setOcclusion(occlusion);
+    set({ occlusion });
+  },
+  setPicking: (picking) => set({ picking }),
   setExporting: (exporting) => set({ exporting }),
   toggleSound: () => {
     const sound = !get().sound;

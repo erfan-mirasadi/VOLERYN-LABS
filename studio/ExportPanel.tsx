@@ -39,7 +39,7 @@ const clock = (ms: number) => {
 };
 
 export default function ExportPanel() {
-  const { engine, status, exporting, presetId, tweaks, plate, setExporting } = useStudioStore();
+  const { engine, status, exporting, presetId, tweaks, plate, depthEstimator, setExporting } = useStudioStore();
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -105,6 +105,9 @@ export default function ExportPanel() {
           </label>
         ))}
         {plate && !sheet && <p className="col-span-2 font-mono text-xs tabular-nums text-muted">{footageSize(plate).join(' × ')}, the footage’s frame</p>}
+        {plate && depthEstimator && settings.mode === 'sequence' && settings.format === 'exr' && (
+          <p className="col-span-2 text-xs text-muted">EXR layers are the fire alone: the foreground does not cut into them.</p>
+        )}
         {sheet && (
           <p className="col-span-2 font-mono text-xs tabular-nums text-muted">
             {sheet.cells} cells · {sheet.seconds.toFixed(1)} s · {+sheet.fps.toFixed(2)} fps playback

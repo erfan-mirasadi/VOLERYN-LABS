@@ -1,3 +1,4 @@
+import { createDepthScale, type DepthEstimator, type DepthMap } from './depth';
 import { createFireSound, type FireSound } from './fire-sound';
 import { requestGpu } from './gpu';
 import { GpuTimer } from './gpu-timer';
@@ -44,6 +45,10 @@ export type EngineStats = {
 // about that point. All three leave the view of the fire itself as the orbit set it.
 export type Framing = { x: number; y: number; scale: number };
 
+// Where the fire stands in the footage's depth, 0 in front of everything and 1 behind it all, and whether the live
+// view marks what covers it.
+export type Occlusion = { depth: number; show: boolean };
+
 export type Engine = Awaited<ReturnType<typeof createEngine>>;
 
 export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Preset, initialQuality: Quality = QUALITIES.balanced) {
@@ -73,6 +78,14 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   let soundOn = false;
   let plate: Plate | null = null;
   let framing: Framing = { x: 0, y: 0, scale: 1 };
+  // The footage's depth while the user has it on: the estimator, the scale that ties every frame to the shot's
+  // first, and the map of the frame the plate is showing.
+  let depth: { estimator: DepthEstimator; scale: ReturnType<typeof createDepthScale>; map: DepthMap | null } | null = null;
+  let occlusion: Occlusion = { depth: 0.5, show: false };
+  // Counts depth runs; one that finds the count moved on has been replaced and stops.
+  let depthRun = 0;
+  // The depth setting as nearness, a little past both ends of the shot's range so 0 covers nothing and 1 everything.
+  const nearness = () => 1.05 - 1.1 * occlusion.depth;
 
   const target: Vec3 = [0, 0.72, 0];
   let azimuth = 0.5;
@@ -133,6 +146,8 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       simulation = createSimulation(device, quality);
       renderer = createRenderer(device, format, simulation.volumes, quality);
       renderer.setPlate(plate);
+      renderer.setDepth(depth?.map ?? null, nearness());
+      renderer.markCover(occlusion.show);
       simulation.clear();
       startBurst();
     } else {
@@ -210,7 +225,12 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     const scale = moving ? Math.max(quality.scaleMin, renderScale - ORBIT_SCALE_DROP) : renderScale;
     liveWidth = Math.max(1, Math.round(canvas.width * scale));
     liveHeight = Math.max(1, Math.round(canvas.height * scale));
-    if (plate?.source instanceof HTMLVideoElement && plate.source.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) renderer.writePlate(plate.source);
+    if (plate?.source instanceof HTMLVideoElement && plate.source.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      renderer.writePlate(plate.source);
+      // The depth is a few frames old, but the matte is fitted to the picture again on every frame, so its edges
+      // stay on the picture's.
+      if (depth?.map) renderer.fitMatte(nearness());
+    }
     renderer.draw(encoder, context.getCurrentTexture().createView(), {
       camera: camera(),
       preset,
@@ -250,6 +270,51 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     lastFrame = fpsSince = performance.now();
     fpsFrames = 0;
     frame = requestAnimationFrame(tick);
+  }
+
+  // Estimates the depth of one frame of the plate and has the renderer cut the matte from it.
+  async function readDepth(source: Plate['source'], run: number) {
+    if (!plate || !depth) return;
+    const map = depth.scale(await depth.estimator.estimate(source, plate.width, plate.height));
+    if (run !== depthRun) return;
+    depth.map = map;
+    renderer.setDepth(map, nearness());
+  }
+
+  // A playing video's depth follows it as fast as the model runs, a few frames behind the picture, until another
+  // run takes over. An export does not wait on it: it reads the depth of each frame it renders.
+  async function followDepth(video: HTMLVideoElement, run: number) {
+    while (run === depthRun) {
+      await new Promise(requestAnimationFrame);
+      if (run !== depthRun || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) continue;
+      // A video that is being swapped out or is between frames has nothing to read; the next turn tries again.
+      const frame = await createImageBitmap(video).catch(() => null);
+      if (!frame) continue;
+      await readDepth(frame, run);
+      frame.close();
+    }
+  }
+
+  // Starts the plate's depth over and resolves once its first frame's depth is showing: that frame sets the scale
+  // every later one is read on. With depth off or no plate it clears the matte instead.
+  async function startDepth() {
+    const run = ++depthRun;
+    const video = plate?.source instanceof HTMLVideoElement ? plate.source : null;
+    if (!plate || !depth) {
+      // A run this one replaced may have left the video paused on its first frame.
+      if (!exporting) void video?.play();
+      return renderer.setDepth(null, 0);
+    }
+    depth.scale = createDepthScale();
+    depth.map = null;
+    if (video) {
+      video.pause();
+      await seekPlate(plate, 0);
+    }
+    await readDepth(plate.source, run);
+    if (!video || run !== depthRun || exporting) return;
+    void video.play();
+    void followDepth(video, run);
   }
 
   const onPointerDown = (event: PointerEvent) => {
@@ -344,6 +409,25 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     setPlate(next: Plate | null) {
       plate = next;
       renderer.setPlate(plate);
+      return startDepth();
+    },
+    // Turns the footage's depth on with an estimator, or off with none; resolves once the first frame's depth shows.
+    setDepth(estimator: DepthEstimator | null) {
+      depth = estimator && { estimator, scale: createDepthScale(), map: null };
+      return startDepth();
+    },
+    setOcclusion(next: Occlusion) {
+      occlusion = next;
+      renderer.markCover(next.show);
+      renderer.fitMatte(nearness());
+    },
+    // The nearness of the footage at a point of the frame, both from 0 to 1, or null with no depth to read.
+    nearnessAt(u: number, v: number) {
+      const map = depth?.map;
+      if (!map) return null;
+      const x = Math.min(map.width - 1, Math.floor(u * map.width));
+      const y = Math.min(map.height - 1, Math.floor(v * map.height));
+      return map.data[y * map.width + x];
     },
     setFraming(next: Framing) {
       framing = next;
@@ -382,12 +466,14 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
         orbit: { azimuth, polar, distance: ORBIT_DISTANCE, fovDegrees: (FOV * 180) / Math.PI },
         framing: { ...framing },
         plate: plate && { name: plate.name, width: plate.width, height: plate.height },
+        occlusion: plate && depth ? { depth: occlusion.depth } : null,
         grid: simulation.grid,
       };
     },
     // Pauses the live loop, restarts the simulation from nothing, on the job's grid if it names one, and renders the
-    // job frame by frame; the preview's grid comes back afterwards. A job that composites the footage steps the
-    // plate through the clip a frame at a time, and the plate plays on when it is done.
+    // job frame by frame; the preview's grid comes back afterwards. A job that composites the footage or holds the
+    // fire out behind it steps the plate, and its depth, through the clip a frame at a time; the plate plays on
+    // when it is done.
     async render(job: OfflineJob, onFrame: (frame: RenderedFrame) => Promise<void>, signal: AbortSignal) {
       if (exporting) throw new Error('An export is already running.');
       exporting = true;
@@ -396,13 +482,16 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       syncSound();
       fps = stepsPerSecond = 0;
       const previewQuality = quality;
-      const footage = job.plate ? plate : null;
+      const footage = job.plate || job.holdout ? plate : null;
       const video = footage?.source instanceof HTMLVideoElement ? footage.source : null;
+      // Whatever depth run was following the plate stops here; the export takes the frames it needs itself.
+      const run = ++depthRun;
       video?.pause();
       const showPlate = footage
         ? async (seconds: number) => {
             await seekPlate(footage, seconds);
             renderer.writePlate(footage.source);
+            if (video) await readDepth(video, run);
           }
         : undefined;
       const step = (dt: number) => {
@@ -431,7 +520,8 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
         await renderOffline({ device, context, canvas, simulation, renderer, preset, blue: tweaks.blue, step, showPlate }, job, onFrame, signal);
       } finally {
         exporting = false;
-        void video?.play();
+        if (depth) void startDepth();
+        else void video?.play();
         if (job.simulation) applyQuality(previewQuality);
         syncSound();
         stepsSince = stepCount;

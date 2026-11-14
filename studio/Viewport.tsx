@@ -2,6 +2,7 @@
 
 import { presetById } from '@/presets/presets';
 import FireCanvas from './FireCanvas';
+import PlacementOverlay from './PlacementOverlay';
 import TimingHud from './TimingHud';
 import WindGizmo from './WindGizmo';
 import { useStudioStore } from './useStudioStore';
@@ -29,6 +30,7 @@ export default function Viewport() {
     <div className={`relative grid min-h-[60vh] flex-1 place-items-center overflow-hidden [container-type:size] ${BACKDROP_CLASS[backdrop]}`}>
       <div className={`relative ${frame ? '' : 'size-full'}`} style={frame ?? undefined}>
         <FireCanvas preset={presetById(presetId)} onEngine={setEngine} label="Fire simulation; drag to orbit" />
+        {status === 'ready' && plate && <PlacementOverlay />}
         {status === 'ready' && <WindGizmo />}
       </div>
       <div className="absolute left-3 top-3">

@@ -1,5 +1,6 @@
 import type { Engine } from '@/engine/engine';
 import { fitCamera, fitToContent, type Fps, loopOverlap, type OfflineJob, type RenderedFrame, substepsFor } from '@/engine/offline-render';
+import { DEPTH_MODEL } from '@/engine/depth';
 import { exportMarch } from '@/engine/render';
 import { RENDER_GRID } from '@/engine/scene';
 import { encodeExr } from './exr';
@@ -101,6 +102,7 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
     shutter: settings.shutter,
     simulation: RENDER_GRID,
     plate: Boolean(footage) && !exr && settings.footage === 'composite',
+    holdout: Boolean(footage && snapshot.occlusion) && !exr,
   };
   onProgress({ done: 0, total: job.frames, msPerFrame: 0 });
   // The clock starts at the first delivered frame, so the warm-up does not inflate the estimate.
@@ -137,7 +139,7 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
 }
 
 // Every input the job had, so the same frames can be rendered again.
-function sidecarFor({ preset, tweaks, boxes, orbit, framing, plate, grid: previewGrid }: ReturnType<Engine['snapshot']>, settings: ExportSettings, job: OfflineJob) {
+function sidecarFor({ preset, tweaks, boxes, orbit, framing, plate, occlusion, grid: previewGrid }: ReturnType<Engine['snapshot']>, settings: ExportSettings, job: OfflineJob) {
   const exr = settings.mode === 'sequence' && settings.format === 'exr';
   const flipbook = settings.mode === 'flipbook';
   const [cols, rows] = settings.grid.split('x').map(Number);
@@ -150,7 +152,17 @@ function sidecarFor({ preset, tweaks, boxes, orbit, framing, plate, grid: previe
     tweaks,
     boxes,
     camera: { ...job.camera, orbit, ...(!flipbook && { framing }) },
-    ...(plate && !flipbook && { footage: { ...plate, composited: Boolean(job.plate) } }),
+    ...(plate && !flipbook && {
+      footage: {
+        ...plate,
+        composited: Boolean(job.plate),
+        ...(occlusion && {
+          occlusion: job.holdout
+            ? { ...occlusion, model: DEPTH_MODEL.name, matte: 'depth cut at the fire, refined by a guided filter on the footage; applied to the display image' }
+            : { ...occlusion, note: 'not applied: the EXR layers are the fire alone' },
+        }),
+      },
+    }),
     render: {
       width: job.width,
       height: job.height,

@@ -14,7 +14,12 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 // Fitting each channel on its own bleaches a hot flame to white; fitting the brightest channel and scaling the
 // colour down to it keeps the hue. Mostly the first with some of the second: the core still brightens towards
 // white where it is hottest, but keeps its yellow and the detail in it on the way there.
-export const TONEMAP = /* wgsl */ `
+// The colour the matte's guided filter reads the plate by, from linear light: close to how light each channel looks.
+export const GUIDE = /* wgsl */ `
+fn guide(rgb: vec3<f32>) -> vec3<f32> { return sqrt(max(rgb, vec3<f32>(0.0))); }
+`;
+
+export const TONEMAP = GUIDE + /* wgsl */ `
 fn encode(m: vec3<f32>) -> vec3<f32> { return select(1.055 * pow(m, vec3<f32>(1.0 / 2.4)) - 0.055, 12.92 * m, m <= vec3<f32>(0.0031308)); }
 fn decode(c: vec3<f32>) -> vec3<f32> { return select(pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045)); }
 fn aces(c: vec3<f32>) -> vec3<f32> { return clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0)); }
@@ -22,13 +27,28 @@ fn tonemap(c: vec3<f32>) -> vec3<f32> {
   let peak = max(max(c.r, c.g), max(c.b, 1e-4));
   return encode(mix(aces(c), c / peak * aces(vec3<f32>(peak)).x, 0.3));
 }
-// A premultiplied display frame over the footage plate. The two meet in linear light, where a flame adds to what is
-// behind it and smoke takes away its share: the frame is decoded, laid over the plate by its alpha and encoded again.
-// With no plate loaded the plate is one clear texel and the frame comes back as it went in.
-fn over(frame: vec4<f32>, plate: vec4<f32>) -> vec4<f32> {
-  let behind = plate.a * (1.0 - frame.a);
-  return vec4<f32>(encode(decode(frame.rgb) + plate.rgb * behind), frame.a + behind);
+// How much of the fire the footage's foreground covers. The matte arrives as the coefficients of a guided filter:
+// over a few pixels the cover is a plane over the plate's own colour, so its edges are the plate's edges at the
+// plate's full sharpness. With them come the least and the most the cover may be here, which keep that plane from
+// reading a highlight deep in the foreground as background. With no depth all are zero and nothing is covered.
+fn coverOf(coefficients: vec4<f32>, bounds: vec4<f32>, plate: vec3<f32>) -> f32 {
+  return clamp(dot(coefficients.rgb, guide(plate)) + coefficients.a, bounds.x, bounds.y);
+}
+// A premultiplied display frame over the footage plate, less the share of it the plate's foreground covers. The two
+// meet in linear light, where a flame adds to what is behind it and smoke takes away its share: the frame is
+// decoded, laid over the plate by its alpha and encoded again. With no plate loaded the plate is one clear texel
+// and the frame comes back as it went in.
+fn over(frame: vec4<f32>, plate: vec4<f32>, cover: f32) -> vec4<f32> {
+  let fire = vec4<f32>(decode(frame.rgb), frame.a) * (1.0 - cover);
+  let behind = plate.a * (1.0 - fire.a);
+  return vec4<f32>(encode(fire.rgb + plate.rgb * behind), fire.a + behind);
 }`;
+
+// plate: whether the frame is laid over the footage or left alone on its own alpha. tint: how strongly the live view
+// marks what covers the fire.
+const LAYERS = /* wgsl */ `
+struct Layers { plate: f32, tint: f32 }
+`;
 
 export const RENDER = BLACKBODY + TONEMAP + /* wgsl */ `
 const KEY_COLOR = ${vec3(KEY_COLOR)};
@@ -306,21 +326,27 @@ fn fsExport(@builtin(position) frag: vec4<f32>) -> ExportOut {
   return ExportOut(vec4<f32>(m.fire, m.alpha) * w, vec4<f32>(m.firelight, m.heat) * w, vec4<f32>(m.smoke, 0.0) * w, data * w);
 }`;
 
-// The accumulated light groups through the same tonemap as the live view, over the footage plate when the export
-// composites one: what a PNG or MP4 frame holds.
-export const DISPLAY = TONEMAP + /* wgsl */ `
+// The accumulated light groups through the same tonemap as the live view: what a PNG or MP4 frame holds. The
+// footage's foreground covers its share of the frame, and the frame goes over the plate when the export composites it.
+export const DISPLAY = TONEMAP + LAYERS + /* wgsl */ `
 @group(0) @binding(0) var fire: texture_2d<f32>;
 @group(0) @binding(1) var firelight: texture_2d<f32>;
 @group(0) @binding(2) var smoke: texture_2d<f32>;
 @group(0) @binding(3) var plate: texture_2d<f32>;
 @group(0) @binding(4) var lin: sampler;
+@group(0) @binding(5) var coefficients: texture_2d<f32>;
+@group(0) @binding(6) var bounds: texture_2d<f32>;
+@group(0) @binding(7) var<uniform> L: Layers;
 ` + FULLSCREEN_VS + /* wgsl */ `
 @fragment
 fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let p = vec2<i32>(frag.xy);
   let f = textureLoad(fire, p, 0);
   let frame = vec4<f32>(tonemap(f.rgb + textureLoad(firelight, p, 0).rgb + textureLoad(smoke, p, 0).rgb), f.a);
-  return over(frame, textureSampleLevel(plate, lin, frag.xy / vec2<f32>(textureDimensions(fire)), 0.0));
+  let uv = frag.xy / vec2<f32>(textureDimensions(fire));
+  let behind = textureSampleLevel(plate, lin, uv, 0.0);
+  let cover = coverOf(textureSampleLevel(coefficients, lin, uv, 0.0), textureSampleLevel(bounds, lin, uv, 0.0), behind.rgb);
+  return over(frame, vec4<f32>(behind.rgb, behind.a * L.plate), cover);
 }`;
 
 // Temporal blend of the jittered raymarch with the last frame, the history clamped to the current neighbourhood so it cannot ghost.
@@ -366,12 +392,20 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
   return textureSampleLevel(src, lin, in.uv, 0.0);
 }`;
 
-// The resolved live frame upsampled onto the canvas, over the footage plate.
-export const PRESENT = TONEMAP + UV_VS + /* wgsl */ `
+// The resolved live frame upsampled onto the canvas, over the footage plate and behind its foreground, which the
+// view can mark in a colour no fire has.
+export const PRESENT = TONEMAP + LAYERS + UV_VS + /* wgsl */ `
+const COVER_TINT = vec3<f32>(0.0, 0.62, 1.0);
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var lin: sampler;
 @group(0) @binding(2) var plate: texture_2d<f32>;
+@group(0) @binding(3) var coefficients: texture_2d<f32>;
+@group(0) @binding(4) var bounds: texture_2d<f32>;
+@group(0) @binding(5) var<uniform> L: Layers;
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
-  return over(textureSampleLevel(src, lin, in.uv, 0.0), textureSampleLevel(plate, lin, in.uv, 0.0));
+  let behind = textureSampleLevel(plate, lin, in.uv, 0.0);
+  let cover = coverOf(textureSampleLevel(coefficients, lin, in.uv, 0.0), textureSampleLevel(bounds, lin, in.uv, 0.0), behind.rgb);
+  let shown = over(textureSampleLevel(src, lin, in.uv, 0.0), behind, cover);
+  return vec4<f32>(mix(shown.rgb, COVER_TINT, 0.5 * cover * L.tint), shown.a);
 }`;

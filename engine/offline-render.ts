@@ -34,6 +34,8 @@ export type OfflineJob = {
   simulation?: SimulationGrid;
   // Lays the display frame over the loaded footage; the light groups stay the fire's own.
   plate?: boolean;
+  // Holds the display frame out behind whatever in the footage is nearer than the fire, by the footage's depth.
+  holdout?: boolean;
 };
 
 // Raw rgba16float texels, four halves per pixel, row y starting at y * stride halves.
@@ -55,7 +57,7 @@ export type OfflineContext = {
   blue: number;
   // Runs one simulation step and returns the simulation time after it.
   step: (dt: number) => number;
-  // Puts the footage plate on its frame for a clip time, when the job composites one.
+  // Puts the footage plate, and its depth, on the frame for a clip time, when the job uses either.
   showPlate?: (seconds: number) => Promise<void>;
 };
 
@@ -166,7 +168,7 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
   const slotBytes = job.read.length * planeBytes;
   const slots = slotBytes > SINGLE_SLOT_BYTES ? 1 : 2;
   device.pushErrorScope('out-of-memory');
-  const targets = renderer.createExportTargets(job.width, job.height, Boolean(ctx.showPlate));
+  const targets = renderer.createExportTargets(job.width, job.height, { overPlate: Boolean(job.plate), holdout: Boolean(job.holdout) });
   const staging = Array.from({ length: slots }, () => device.createBuffer({ size: slotBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
   if (await device.popErrorScope()) {
     targets.destroy();
