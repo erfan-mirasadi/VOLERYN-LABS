@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import type { Engine } from '@/engine/engine';
+import { createEngine, type Engine } from '@/engine/engine';
 import { WebGpuUnavailable } from '@/engine/gpu';
 import type { Preset } from '@/engine/scene';
 import type { GpuStatus } from './useStudioStore';
@@ -12,7 +12,8 @@ type Props = {
   label: string;
 };
 
-// Fills its positioned parent with one canvas and owns the engine on it; the engine module loads only when the canvas mounts.
+// Fills its positioned parent with one canvas and owns the engine on it. Pages load this component lazily with the
+// engine inside it, and import the engine statically here, so an edit to the engine's code reaches the running one.
 export default function FireCanvas({ preset, onEngine, label }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -20,8 +21,7 @@ export default function FireCanvas({ preset, onEngine, label }: Props) {
     const canvas = canvasRef.current!;
     let engine: Engine | null = null;
     let cancelled = false;
-    import('@/engine/engine')
-      .then(({ createEngine }) => createEngine(canvas, preset))
+    createEngine(canvas, preset)
       .then((created) => {
         if (cancelled) return created.dispose();
         engine = created;

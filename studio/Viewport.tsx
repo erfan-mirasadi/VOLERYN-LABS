@@ -1,12 +1,15 @@
 'use client';
 
+import dynamic from 'next/dynamic';
 import { presetById } from '@/presets/presets';
-import FireCanvas from './FireCanvas';
 import PlacementOverlay from './PlacementOverlay';
 import PlateTransport from './PlateTransport';
 import TimingHud from './TimingHud';
 import WindGizmo from './WindGizmo';
 import { useStudioStore } from './useStudioStore';
+
+// The canvas and the engine in it load after the page, in a chunk of their own.
+const FireCanvas = dynamic(() => import('./FireCanvas'), { ssr: false });
 
 const BACKDROP_CLASS = {
   checker: 'bg-[repeating-conic-gradient(#2a2d35_0_25%,#1b1d24_0_50%)] bg-[length:24px_24px]',

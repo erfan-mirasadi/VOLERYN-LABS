@@ -9,6 +9,15 @@ import { type Camera, cameraBasis, createRenderer, type Vec3 } from './render';
 import { BLAST_DECAY, type Box, BURST_EVERY, DT, MAX_BOXES, type Preset, QUALITIES, type Quality, type Tweaks } from './scene';
 import { createSimulation } from './simulation';
 
+// The canvas builds its engine once, when it mounts, so a hot update to the engine's code would leave the running
+// engine on the old code: new controls would call methods it does not have and shader edits would never show. In
+// development the page reloads when this module runs a second time instead.
+if (process.env.NODE_ENV === 'development') {
+  const page = globalThis as { engineModuleLoaded?: boolean };
+  if (page.engineModuleLoaded) location.reload();
+  page.engineModuleLoaded = true;
+}
+
 const FOV = (35 * Math.PI) / 180;
 const ORBIT_DISTANCE = 3;
 const MAX_PIXEL_RATIO = 2;

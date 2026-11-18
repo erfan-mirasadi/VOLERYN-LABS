@@ -1,11 +1,14 @@
 'use client';
 
+import dynamic from 'next/dynamic';
 import { useEffect, useRef, useState } from 'react';
 import type { Engine, EngineStats } from '@/engine/engine';
 import { GRID } from '@/engine/scene';
 import { PRESETS } from '@/presets/presets';
-import FireCanvas from '@/studio/FireCanvas';
 import type { GpuStatus } from '@/studio/useStudioStore';
+
+// The canvas and the engine in it load after the page, in a chunk of their own.
+const FireCanvas = dynamic(() => import('@/studio/FireCanvas'), { ssr: false });
 
 const STATE: Record<GpuStatus, string> = { loading: 'Starting', ready: 'Live', unsupported: 'No WebGPU', error: 'GPU stopped' };
 const REFRESH_MS = 500;
