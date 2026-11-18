@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "mediabunny": "1.62.1",
-    "next": "16.4.3",
+    "next": "16.4.6",
     "onnxruntime-web": "1.31.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
@@ -24,7 +24,7 @@
     "@webgpu/types": "^0.1.74",
     "babel-plugin-react-compiler": "1.0.0",
     "eslint": "^9",
-    "eslint-config-next": "16.4.3",
+    "eslint-config-next": "16.4.6",
     "tailwindcss": "^4",
     "typescript": "^5"
   }
