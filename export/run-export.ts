@@ -1,6 +1,6 @@
 import type { Engine } from '@/engine/engine';
 import { fitCamera, fitToContent, type Fps, loopOverlap, type OfflineJob, type RenderedFrame, substepsFor } from '@/engine/offline-render';
-import { DEPTH_MODEL } from '@/engine/depth';
+import { DEPTH_MODEL, DETAIL } from '@/engine/depth';
 import { exportMarch } from '@/engine/render';
 import { RENDER_GRID } from '@/engine/scene';
 import { encodeExr } from './exr';
@@ -158,7 +158,7 @@ function sidecarFor({ preset, tweaks, boxes, orbit, framing, plate, occlusion, g
         composited: Boolean(job.plate),
         ...(occlusion && {
           occlusion: job.holdout
-            ? { ...occlusion, model: DEPTH_MODEL.name, matte: 'depth cut at the fire, refined by a guided filter on the footage; applied to the display image' }
+            ? { ...occlusion, model: DEPTH_MODEL.name, detail: DETAIL.full, matte: 'the footage’s depth cut at the fire; applied to the display image' }
             : { ...occlusion, note: 'not applied: the EXR layers are the fire alone' },
         }),
       },

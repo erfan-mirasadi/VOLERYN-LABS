@@ -1,4 +1,4 @@
-import { createDepthScale, type DepthEstimator, type DepthMap } from './depth';
+import { createDepthScale, DETAIL, type DepthEstimator, type DepthMap } from './depth';
 import { createFireSound, type FireSound } from './fire-sound';
 import { requestGpu } from './gpu';
 import { GpuTimer } from './gpu-timer';
@@ -227,9 +227,6 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     liveHeight = Math.max(1, Math.round(canvas.height * scale));
     if (plate?.source instanceof HTMLVideoElement && plate.source.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
       renderer.writePlate(plate.source);
-      // The depth is a few frames old, but the matte is fitted to the picture again on every frame, so its edges
-      // stay on the picture's.
-      if (depth?.map) renderer.fitMatte(nearness());
     }
     renderer.draw(encoder, context.getCurrentTexture().createView(), {
       camera: camera(),
@@ -272,17 +269,17 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     frame = requestAnimationFrame(tick);
   }
 
-  // Estimates the depth of one frame of the plate and has the renderer cut the matte from it.
-  async function readDepth(source: Plate['source'], run: number) {
+  // Estimates the depth of one frame of the plate, at `longSide` pixels of detail, and hands it to the renderer.
+  async function readDepth(source: Plate['source'], run: number, longSide: number) {
     if (!plate || !depth) return;
-    const map = depth.scale(await depth.estimator.estimate(source, plate.width, plate.height));
+    const map = depth.scale(await depth.estimator.estimate(source, plate.width, plate.height, longSide));
     if (run !== depthRun) return;
     depth.map = map;
     renderer.setDepth(map, nearness());
   }
 
-  // A playing video's depth follows it as fast as the model runs, a few frames behind the picture, until another
-  // run takes over. An export does not wait on it: it reads the depth of each frame it renders.
+  // A playing video's depth follows it as fast as the model runs at live detail, a few frames behind the picture,
+  // until another run takes over. An export does not wait on it: it reads each frame it renders at full detail.
   async function followDepth(video: HTMLVideoElement, run: number) {
     while (run === depthRun) {
       await new Promise(requestAnimationFrame);
@@ -290,7 +287,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       // A video that is being swapped out or is between frames has nothing to read; the next turn tries again.
       const frame = await createImageBitmap(video).catch(() => null);
       if (!frame) continue;
-      await readDepth(frame, run);
+      await readDepth(frame, run, DETAIL.live);
       frame.close();
     }
   }
@@ -311,7 +308,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       video.pause();
       await seekPlate(plate, 0);
     }
-    await readDepth(plate.source, run);
+    await readDepth(plate.source, run, video ? DETAIL.live : DETAIL.full);
     if (!video || run !== depthRun || exporting) return;
     void video.play();
     void followDepth(video, run);
@@ -419,7 +416,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     setOcclusion(next: Occlusion) {
       occlusion = next;
       renderer.markCover(next.show);
-      renderer.fitMatte(nearness());
+      renderer.setHoldout(nearness());
     },
     // The nearness of the footage at a point of the frame, both from 0 to 1, or null with no depth to read.
     nearnessAt(u: number, v: number) {
@@ -491,7 +488,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
         ? async (seconds: number) => {
             await seekPlate(footage, seconds);
             renderer.writePlate(footage.source);
-            if (video) await readDepth(video, run);
+            if (video) await readDepth(video, run, DETAIL.full);
           }
         : undefined;
       const step = (dt: number) => {

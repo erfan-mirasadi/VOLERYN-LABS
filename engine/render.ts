@@ -1,5 +1,4 @@
 import type { DepthMap } from './depth';
-import { createMatte } from './matte';
 import type { Plate } from './plate';
 import { COMPOSITE, DISPLAY, PRESENT, RENDER, RESOLVE } from './render-shaders';
 import { BOX_MAX, BOX_MIN, DENSITY, EXPOSURE, FIRE_LIGHT, FLOW_PERIOD, GRID, type Preset, type Quality } from './scene';
@@ -101,8 +100,12 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   // The footage behind the fire, read as linear light; one clear texel until a plate is loaded.
   const noPlate = device.createTexture({ size: [1, 1], format: 'rgba8unorm-srgb', usage: GPUTextureUsage.TEXTURE_BINDING });
   let plate = noPlate;
-  // What in the plate stands in front of the fire, and the live view's switch for marking it.
-  const matte = createMatte(device, volumes.sampler);
+  // The plate's depth as nearness, one float a texel, and the nearness the fire stands at: what is nearer covers it.
+  // With no depth one texel far behind everything covers nothing.
+  const noDepth = device.createTexture({ size: [1, 1], format: 'r32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  device.queue.writeTexture({ texture: noDepth }, new Float32Array([-1e4]), { bytesPerRow: 4 }, [1, 1]);
+  let depth = noDepth;
+  const holdBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const layersBuffer = (plate: number, tint: number) => {
     const buffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(buffer, 0, new Float32Array([plate, tint]));
@@ -177,8 +180,8 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
             { binding: 0, resource: view },
             { binding: 1, resource: volumes.sampler },
             { binding: 2, resource: plate.createView() },
-            { binding: 3, resource: matte.coefficients.createView() },
-            { binding: 4, resource: matte.bounds.createView() },
+            { binding: 3, resource: depth.createView() },
+            { binding: 4, resource: { buffer: holdBuffer } },
             { binding: 5, resource: { buffer: presentLayers } },
           ],
         }),
@@ -292,29 +295,31 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   }
 
   // The depth of the plate's footage, or none, and where the fire stands in it: whatever is nearer than `nearness`
-  // covers the fire.
+  // covers the fire. A map of another size takes a new texture, and the live targets go with the old one.
   function setDepth(map: DepthMap | null, nearness: number) {
-    if (matte.setDepth(map)) {
+    const fits = map ? depth !== noDepth && depth.width === map.width && depth.height === map.height : depth === noDepth;
+    if (!fits) {
+      if (depth !== noDepth) depth.destroy();
+      depth = map ? device.createTexture({ size: [map.width, map.height], format: 'r32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST }) : noDepth;
       disposeTargets();
       historyValid = false;
     }
-    fitMatte(nearness);
+    if (map) device.queue.writeTexture({ texture: depth }, map.data, { bytesPerRow: 4 * map.width }, [map.width, map.height]);
+    setHoldout(nearness);
   }
 
-  // Cuts the matte again from the depth it has, for the plate's frame as it now is or a new place for the fire.
-  function fitMatte(nearness: number) {
-    matte.update(plate, nearness);
+  function setHoldout(nearness: number) {
+    device.queue.writeBuffer(holdBuffer, 0, new Float32Array([nearness]));
   }
 
   function markCover(on: boolean) {
     device.queue.writeBuffer(presentLayers, 0, new Float32Array([1, on ? 1 : 0]));
   }
 
-  // The light groups and the data target, the tonemapped display frame, and the groups that read them. The display
-  // frame goes over the footage plate when the export composites it, and behind the plate's foreground when it
-  // holds the fire out.
+  // The light groups and the data target, the tonemapped display frame, and the preview's group. The display frame
+  // goes over the footage plate when the export composites it, and behind the plate's foreground when it holds the
+  // fire out.
   function createExportTargets(width: number, height: number, { overPlate, holdout }: { overPlate: boolean; holdout: boolean }) {
-    const { display: displayPipeline } = exportResources();
     const make = () =>
       device.createTexture({ size: [width, height], format: TARGET_FORMAT, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
     const layers = { fire: make(), firelight: make(), smoke: make(), data: make() };
@@ -325,16 +330,9 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
       height,
       layers,
       display,
-      displayGroup: device.createBindGroup({
-        layout: displayPipeline.getBindGroupLayout(0),
-        entries: [
-          ...[layers.fire, layers.firelight, layers.smoke, overPlate || holdout ? plate : noPlate].map((texture, binding) => ({ binding, resource: texture.createView() })),
-          { binding: 4, resource: volumes.sampler },
-          { binding: 5, resource: (holdout ? matte.coefficients : matte.none).createView() },
-          { binding: 6, resource: (holdout ? matte.bounds : matte.none).createView() },
-          { binding: 7, resource: { buffer: displayLayers } },
-        ],
-      }),
+      displayLayers,
+      overPlate,
+      holdout,
       previewGroup: device.createBindGroup({
         layout: composite.getBindGroupLayout(0),
         entries: [
@@ -380,8 +378,20 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     }
   }
 
-  function drawDisplay(encoder: GPUCommandEncoder, targets: ExportTargets) {
-    fullscreenPass(encoder, targets.display.createView(), exportResources().display, targets.displayGroup);
+  // The group is made for each frame: a video's frames bring depth maps of their own, which may take a new texture.
+  function drawDisplay(encoder: GPUCommandEncoder, { layers, display, displayLayers, overPlate, holdout }: ExportTargets) {
+    const { display: displayPipeline } = exportResources();
+    const group = device.createBindGroup({
+      layout: displayPipeline.getBindGroupLayout(0),
+      entries: [
+        ...[layers.fire, layers.firelight, layers.smoke, overPlate ? plate : noPlate].map((texture, binding) => ({ binding, resource: texture.createView() })),
+        { binding: 4, resource: volumes.sampler },
+        { binding: 5, resource: (holdout ? depth : noDepth).createView() },
+        { binding: 6, resource: { buffer: holdBuffer } },
+        { binding: 7, resource: { buffer: displayLayers } },
+      ],
+    });
+    fullscreenPass(encoder, display.createView(), displayPipeline, group);
   }
 
   // The finished frame letterboxed on the canvas, so the viewport shows the export as it renders.
@@ -402,7 +412,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
     setPlate,
     writePlate,
     setDepth,
-    fitMatte,
+    setHoldout,
     markCover,
     createExportTargets,
     drawExportSample,
@@ -419,7 +429,9 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
       sparks.dispose();
       if (plate !== noPlate) plate.destroy();
       noPlate.destroy();
-      matte.dispose();
+      if (depth !== noDepth) depth.destroy();
+      noDepth.destroy();
+      holdBuffer.destroy();
       presentLayers.destroy();
       viewBuffer.destroy();
       blendBuffer.destroy();

@@ -100,7 +100,7 @@ export default function FootagePanel() {
           )}
           <p className="text-xs text-muted">
             {depthEstimator
-              ? 'The fire goes behind whatever is nearer than its depth. Pick a spot where it should stand, or slide it back until the foreground closes over it. On a moving shot the live view’s depth trails by a few frames; a render reads every frame’s own.'
+              ? 'The fire goes behind whatever is nearer than its depth. Pick a spot where it should stand, or slide it back until the foreground closes over it. A playing video’s depth is read live at half detail, a few frames behind; a still, and every frame of a render, at full detail.'
               : 'Reads the shot’s depth on this device, so the fire can stand behind a wall or a person. The first use fetches a 50 MB model; the footage itself never leaves the device.'}
           </p>
         </>

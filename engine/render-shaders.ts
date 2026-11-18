@@ -14,25 +14,13 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 // Fitting each channel on its own bleaches a hot flame to white; fitting the brightest channel and scaling the
 // colour down to it keeps the hue. Mostly the first with some of the second: the core still brightens towards
 // white where it is hottest, but keeps its yellow and the detail in it on the way there.
-// The colour the matte's guided filter reads the plate by, from linear light: close to how light each channel looks.
-export const GUIDE = /* wgsl */ `
-fn guide(rgb: vec3<f32>) -> vec3<f32> { return sqrt(max(rgb, vec3<f32>(0.0))); }
-`;
-
-export const TONEMAP = GUIDE + /* wgsl */ `
+export const TONEMAP = /* wgsl */ `
 fn encode(m: vec3<f32>) -> vec3<f32> { return select(1.055 * pow(m, vec3<f32>(1.0 / 2.4)) - 0.055, 12.92 * m, m <= vec3<f32>(0.0031308)); }
 fn decode(c: vec3<f32>) -> vec3<f32> { return select(pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045)); }
 fn aces(c: vec3<f32>) -> vec3<f32> { return clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0)); }
 fn tonemap(c: vec3<f32>) -> vec3<f32> {
   let peak = max(max(c.r, c.g), max(c.b, 1e-4));
   return encode(mix(aces(c), c / peak * aces(vec3<f32>(peak)).x, 0.3));
-}
-// How much of the fire the footage's foreground covers. The matte arrives as the coefficients of a guided filter:
-// over a few pixels the cover is a plane over the plate's own colour, so its edges are the plate's edges at the
-// plate's full sharpness. With them come the least and the most the cover may be here, which keep that plane from
-// reading a highlight deep in the foreground as background. With no depth all are zero and nothing is covered.
-fn coverOf(coefficients: vec4<f32>, bounds: vec4<f32>, plate: vec3<f32>) -> f32 {
-  return clamp(dot(coefficients.rgb, guide(plate)) + coefficients.a, bounds.x, bounds.y);
 }
 // A premultiplied display frame over the footage plate, less the share of it the plate's foreground covers. The two
 // meet in linear light, where a flame adds to what is behind it and smoke takes away its share: the frame is
@@ -48,6 +36,32 @@ fn over(frame: vec4<f32>, plate: vec4<f32>, cover: f32) -> vec4<f32> {
 // marks what covers the fire.
 const LAYERS = /* wgsl */ `
 struct Layers { plate: f32, tint: f32 }
+`;
+
+// How much of the fire the footage's foreground covers: the plate's depth, read between its texels, against the
+// nearness the fire stands at. A pixel of the footage is either in front of the fire or behind it, so the cut is as
+// sharp as the pixels allow wherever the depth jumps, as it does at the edge of a pole or a wall; where it only
+// slopes, along the ground the fire stands on, the cover comes in over SOFT of nearness instead of a hard line that
+// would stair-step. With no depth the map is one texel far behind everything and covers nothing. The bindings are
+// the including shader's: `depth`, one nearness a texel, and `H`.
+const SOFT = 0.04;
+const HOLDOUT = /* wgsl */ `
+struct Hold { nearness: f32 }
+fn depthAt(texel: vec2<i32>) -> f32 {
+  return textureLoad(depth, clamp(texel, vec2<i32>(0), vec2<i32>(textureDimensions(depth)) - vec2<i32>(1)), 0).x;
+}
+fn coverAt(uv: vec2<f32>) -> f32 {
+  let at = uv * vec2<f32>(textureDimensions(depth)) - 0.5;
+  let corner = vec2<i32>(floor(at));
+  let f = fract(at);
+  let near = mix(
+    mix(depthAt(corner), depthAt(corner + vec2<i32>(1, 0)), f.x),
+    mix(depthAt(corner + vec2<i32>(0, 1)), depthAt(corner + vec2<i32>(1, 1)), f.x),
+    f.y
+  );
+  let ahead = near - H.nearness;
+  return smoothstep(0.0, max(${SOFT}, 1.5 * fwidth(ahead)), ahead);
+}
 `;
 
 export const RENDER = BLACKBODY + TONEMAP + /* wgsl */ `
@@ -328,14 +342,14 @@ fn fsExport(@builtin(position) frag: vec4<f32>) -> ExportOut {
 
 // The accumulated light groups through the same tonemap as the live view: what a PNG or MP4 frame holds. The
 // footage's foreground covers its share of the frame, and the frame goes over the plate when the export composites it.
-export const DISPLAY = TONEMAP + LAYERS + /* wgsl */ `
+export const DISPLAY = TONEMAP + LAYERS + HOLDOUT + /* wgsl */ `
 @group(0) @binding(0) var fire: texture_2d<f32>;
 @group(0) @binding(1) var firelight: texture_2d<f32>;
 @group(0) @binding(2) var smoke: texture_2d<f32>;
 @group(0) @binding(3) var plate: texture_2d<f32>;
 @group(0) @binding(4) var lin: sampler;
-@group(0) @binding(5) var coefficients: texture_2d<f32>;
-@group(0) @binding(6) var bounds: texture_2d<f32>;
+@group(0) @binding(5) var depth: texture_2d<f32>;
+@group(0) @binding(6) var<uniform> H: Hold;
 @group(0) @binding(7) var<uniform> L: Layers;
 ` + FULLSCREEN_VS + /* wgsl */ `
 @fragment
@@ -345,8 +359,7 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let frame = vec4<f32>(tonemap(f.rgb + textureLoad(firelight, p, 0).rgb + textureLoad(smoke, p, 0).rgb), f.a);
   let uv = frag.xy / vec2<f32>(textureDimensions(fire));
   let behind = textureSampleLevel(plate, lin, uv, 0.0);
-  let cover = coverOf(textureSampleLevel(coefficients, lin, uv, 0.0), textureSampleLevel(bounds, lin, uv, 0.0), behind.rgb);
-  return over(frame, vec4<f32>(behind.rgb, behind.a * L.plate), cover);
+  return over(frame, vec4<f32>(behind.rgb, behind.a * L.plate), coverAt(uv));
 }`;
 
 // Temporal blend of the jittered raymarch with the last frame, the history clamped to the current neighbourhood so it cannot ghost.
@@ -394,18 +407,18 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 
 // The resolved live frame upsampled onto the canvas, over the footage plate and behind its foreground, which the
 // view can mark in a colour no fire has.
-export const PRESENT = TONEMAP + LAYERS + UV_VS + /* wgsl */ `
+export const PRESENT = TONEMAP + LAYERS + HOLDOUT + UV_VS + /* wgsl */ `
 const COVER_TINT = vec3<f32>(0.0, 0.62, 1.0);
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var lin: sampler;
 @group(0) @binding(2) var plate: texture_2d<f32>;
-@group(0) @binding(3) var coefficients: texture_2d<f32>;
-@group(0) @binding(4) var bounds: texture_2d<f32>;
+@group(0) @binding(3) var depth: texture_2d<f32>;
+@group(0) @binding(4) var<uniform> H: Hold;
 @group(0) @binding(5) var<uniform> L: Layers;
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
   let behind = textureSampleLevel(plate, lin, in.uv, 0.0);
-  let cover = coverOf(textureSampleLevel(coefficients, lin, in.uv, 0.0), textureSampleLevel(bounds, lin, in.uv, 0.0), behind.rgb);
+  let cover = coverAt(in.uv);
   let shown = over(textureSampleLevel(src, lin, in.uv, 0.0), behind, cover);
   return vec4<f32>(mix(shown.rgb, COVER_TINT, 0.5 * cover * L.tint), shown.a);
 }`;

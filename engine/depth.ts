@@ -4,8 +4,11 @@
 const REPOSITORY = 'https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/4472b7362082ad9968fee890ca0f1e5aca36b93d/onnx';
 export const DEPTH_MODEL = { name: 'Depth Anything V2 Small', megabytes: 50 };
 const CACHE = 'voleryn-models';
-// The model reads the frame at this many pixels on its long side, in whole 14-pixel patches.
-const LONG_SIDE = 518;
+// How many pixels the model reads the frame at on its long side, in whole 14-pixel patches. 518 is the size it
+// was trained at and keeps up with a playing video. A frame read once, a still or a frame of a render, gets twice
+// that: the model's edges sit about a patch wide, and at 518 that is a strip of background beside a thin pole that
+// reads as near as the pole itself.
+export const DETAIL = { live: 518, full: 1036 };
 const PATCH = 14;
 const MEAN = [0.485, 0.456, 0.406];
 const DEVIATION = [0.229, 0.224, 0.225];
@@ -13,7 +16,7 @@ const DEVIATION = [0.229, 0.224, 0.225];
 // Row-major values, width * height of them. From the model they are relative inverse depth, larger when nearer, on
 // a scale of its own; scaled to a shot they are nearness, 0 at the far end of the shot's first frame and 1 at its near end.
 export type DepthMap = { width: number; height: number; data: Float32Array<ArrayBuffer> };
-export type DepthEstimator = { estimate(source: CanvasImageSource, width: number, height: number): Promise<DepthMap> };
+export type DepthEstimator = { estimate(source: CanvasImageSource, width: number, height: number, longSide: number): Promise<DepthMap> };
 
 let loading: Promise<DepthEstimator> | undefined;
 
@@ -39,8 +42,8 @@ async function createEstimator(onProgress: (fraction: number) => void): Promise<
   // A session runs one frame at a time, so calls queue behind each other.
   let last: Promise<unknown> = Promise.resolve();
 
-  async function run(source: CanvasImageSource, sourceWidth: number, sourceHeight: number): Promise<DepthMap> {
-    const scale = LONG_SIDE / Math.max(sourceWidth, sourceHeight);
+  async function run(source: CanvasImageSource, sourceWidth: number, sourceHeight: number, longSide: number): Promise<DepthMap> {
+    const scale = longSide / Math.max(sourceWidth, sourceHeight);
     const width = PATCH * Math.max(1, Math.round((sourceWidth * scale) / PATCH));
     const height = PATCH * Math.max(1, Math.round((sourceHeight * scale) / PATCH));
     if (canvas.width !== width || canvas.height !== height) {
@@ -61,8 +64,8 @@ async function createEstimator(onProgress: (fraction: number) => void): Promise<
   }
 
   return {
-    estimate(source, width, height) {
-      const next = last.then(() => run(source, width, height));
+    estimate(source, width, height, longSide) {
+      const next = last.then(() => run(source, width, height, longSide));
       last = next.catch(() => {});
       return next;
     },
@@ -92,10 +95,21 @@ async function fetchModel(url: string, onProgress: (fraction: number) => void) {
   return model;
 }
 
-const STRIDE = 16;
+// A shot's maps are compared at the same GRID × GRID places in the frame, so a map read at full detail for a render
+// pairs up with the live ones the shot's scale was set from.
+const GRID = 96;
+
+function sampleGrid({ width, height, data }: DepthMap) {
+  const samples = new Float32Array(GRID * GRID);
+  for (let y = 0; y < GRID; y++) {
+    const row = Math.floor(((y + 0.5) / GRID) * height) * width;
+    for (let x = 0; x < GRID; x++) samples[y * GRID + x] = data[row + Math.floor(((x + 0.5) / GRID) * width)];
+  }
+  return samples;
+}
 
 // The line s * x + t that best carries one frame's raw depth onto the reference frame's, fitted twice: the second
-// time without the pixels the first fit missed by most, which is whatever moved in the shot. Frames that no longer
+// time without the places the first fit missed by most, which is whatever moved in the shot. Frames that no longer
 // agree on what is near, after a cut or a long pan, keep the model's own scale.
 function fitScale(x: Float32Array, y: Float32Array): [scale: number, shift: number] {
   let s = 1;
@@ -108,7 +122,7 @@ function fitScale(x: Float32Array, y: Float32Array): [scale: number, shift: numb
     let sxx = 0;
     let sxy = 0;
     let syy = 0;
-    for (let i = 0; i < x.length; i += STRIDE) {
+    for (let i = 0; i < x.length; i++) {
       if (Math.abs(s * x[i] + t - y[i]) > within) continue;
       n++;
       sx += x[i];
@@ -133,18 +147,19 @@ function fitScale(x: Float32Array, y: Float32Array): [scale: number, shift: numb
 // frame, so each later map is first fitted back onto the reference; then the same depth setting cuts the same
 // place in the shot whichever frame is showing, live or in an export.
 export function createDepthScale() {
-  let reference: { raw: Float32Array; low: number; span: number } | null = null;
-  return ({ width, height, data }: DepthMap): DepthMap => {
+  let reference: { samples: Float32Array; low: number; span: number } | null = null;
+  return (map: DepthMap): DepthMap => {
+    const samples = sampleGrid(map);
     let s = 1;
     let t = 0;
-    if (reference?.raw.length === data.length) {
-      [s, t] = fitScale(data, reference.raw);
+    if (reference) {
+      [s, t] = fitScale(samples, reference.samples);
     } else {
-      const sorted = data.filter((_, i) => i % 4 === 0).sort();
+      const sorted = samples.toSorted();
       const low = sorted[Math.floor(0.01 * sorted.length)];
-      reference = { raw: data, low, span: Math.max(sorted[Math.floor(0.99 * sorted.length)] - low, 1e-6) };
+      reference = { samples, low, span: Math.max(sorted[Math.floor(0.99 * sorted.length)] - low, 1e-6) };
     }
     const { low, span } = reference;
-    return { width, height, data: data.map((value) => (s * value + t - low) / span) };
+    return { ...map, data: map.data.map((value) => (s * value + t - low) / span) };
   };
 }
