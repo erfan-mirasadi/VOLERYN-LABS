@@ -88,6 +88,11 @@ export default function FootagePanel() {
                 <input type="range" min={0} max={1} step={0.005} value={occlusion.depth} onChange={(event) => setOcclusion({ depth: Number(event.target.value) })} className="accent-ember" />
                 <span className={VALUE}>{occlusion.depth}</span>
               </label>
+              <label className={SLIDER_ROW}>
+                <span>Softness</span>
+                <input type="range" min={0} max={1} step={0.01} value={occlusion.softness} onChange={(event) => setOcclusion({ softness: Number(event.target.value) })} className="accent-ember" />
+                <span className={VALUE}>{occlusion.softness}</span>
+              </label>
               <div className="flex flex-wrap gap-2">
                 <button type="button" aria-pressed={picking} onClick={() => setPicking(!picking)} className={PILL}>
                   {picking ? 'Click a spot in the shot' : 'Pick depth in the shot'}
@@ -100,7 +105,7 @@ export default function FootagePanel() {
           )}
           <p className="text-xs text-muted">
             {depthEstimator
-              ? 'The fire goes behind whatever is nearer than its depth. Pick a spot where it should stand, or slide it back until the foreground closes over it. A playing video’s depth is read live at half detail, a few frames behind; a still, and every frame of a render, at full detail.'
+              ? 'The fire goes behind whatever is nearer than its depth. Pick a spot where it should stand, or slide it back until the foreground closes over it. A playing video’s depth is read at half detail, a few frames behind; a held frame, a still and every frame of a render at full detail.'
               : 'Reads the shot’s depth on this device, so the fire can stand behind a wall or a person. The first use fetches a 50 MB model; the footage itself never leaves the device.'}
           </p>
         </>

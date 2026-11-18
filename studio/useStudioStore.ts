@@ -50,7 +50,7 @@ export const useStudioStore = create<StudioState>()((set, get) => ({
   plate: null,
   framing: CENTRED,
   depthEstimator: null,
-  occlusion: { depth: 0.5, show: false },
+  occlusion: { depth: 0.5, softness: 0.5, show: false },
   picking: false,
   quality: 'balanced',
   exporting: false,

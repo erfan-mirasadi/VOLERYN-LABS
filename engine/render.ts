@@ -100,10 +100,10 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   // The footage behind the fire, read as linear light; one clear texel until a plate is loaded.
   const noPlate = device.createTexture({ size: [1, 1], format: 'rgba8unorm-srgb', usage: GPUTextureUsage.TEXTURE_BINDING });
   let plate = noPlate;
-  // The plate's depth as nearness, one float a texel, and the nearness the fire stands at: what is nearer covers it.
-  // With no depth one texel far behind everything covers nothing.
-  const noDepth = device.createTexture({ size: [1, 1], format: 'r32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-  device.queue.writeTexture({ texture: noDepth }, new Float32Array([-1e4]), { bytesPerRow: 4 }, [1, 1]);
+  // The plate's depth, each texel its nearness and how steeply that changes, and where the fire stands in it: what is
+  // nearer covers it. With no depth one texel far behind everything covers nothing.
+  const noDepth = device.createTexture({ size: [1, 1], format: 'rg32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  device.queue.writeTexture({ texture: noDepth }, new Float32Array([-1e4, 0]), { bytesPerRow: 8 }, [1, 1]);
   let depth = noDepth;
   const holdBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const layersBuffer = (plate: number, tint: number) => {
@@ -296,20 +296,21 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
 
   // The depth of the plate's footage, or none, and where the fire stands in it: whatever is nearer than `nearness`
   // covers the fire. A map of another size takes a new texture, and the live targets go with the old one.
-  function setDepth(map: DepthMap | null, nearness: number) {
+  function setDepth(map: DepthMap | null, nearness: number, reach: number) {
     const fits = map ? depth !== noDepth && depth.width === map.width && depth.height === map.height : depth === noDepth;
     if (!fits) {
       if (depth !== noDepth) depth.destroy();
-      depth = map ? device.createTexture({ size: [map.width, map.height], format: 'r32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST }) : noDepth;
+      depth = map ? device.createTexture({ size: [map.width, map.height], format: 'rg32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST }) : noDepth;
       disposeTargets();
       historyValid = false;
     }
-    if (map) device.queue.writeTexture({ texture: depth }, map.data, { bytesPerRow: 4 * map.width }, [map.width, map.height]);
-    setHoldout(nearness);
+    if (map) device.queue.writeTexture({ texture: depth }, withSlope(map), { bytesPerRow: 8 * map.width }, [map.width, map.height]);
+    setHoldout(nearness, reach);
   }
 
-  function setHoldout(nearness: number) {
-    device.queue.writeBuffer(holdBuffer, 0, new Float32Array([nearness]));
+  // `reach` is how far across the frame, as a share of its long side, the cover's soft edge may spread.
+  function setHoldout(nearness: number, reach: number) {
+    device.queue.writeBuffer(holdBuffer, 0, new Float32Array([nearness, reach]));
   }
 
   function markCover(on: boolean) {
@@ -451,3 +452,18 @@ export const unit = (a: Vec3): Vec3 => {
   return [a[0] / length, a[1] / length, a[2] / length];
 };
 const cross = (a: Vec3, b: Vec3): Vec3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+
+// Each texel's nearness beside how much it changes per texel, from its neighbours on either side: the cover's edge
+// is soft where the depth slopes and sharp where it jumps.
+function withSlope({ width, height, data }: DepthMap) {
+  const texels = new Float32Array(2 * width * height);
+  const at = (x: number, y: number) => data[Math.min(height - 1, Math.max(0, y)) * width + Math.min(width - 1, Math.max(0, x))];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      texels[2 * i] = data[i];
+      texels[2 * i + 1] = 0.5 * Math.hypot(at(x + 1, y) - at(x - 1, y), at(x, y + 1) - at(x, y - 1));
+    }
+  }
+  return texels;
+}

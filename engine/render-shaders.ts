@@ -39,28 +39,33 @@ struct Layers { plate: f32, tint: f32 }
 `;
 
 // How much of the fire the footage's foreground covers: the plate's depth, read between its texels, against the
-// nearness the fire stands at. A pixel of the footage is either in front of the fire or behind it, so the cut is as
-// sharp as the pixels allow wherever the depth jumps, as it does at the edge of a pole or a wall; where it only
-// slopes, along the ground the fire stands on, the cover comes in over SOFT of nearness instead of a hard line that
-// would stair-step. With no depth the map is one texel far behind everything and covers nothing. The bindings are
-// the including shader's: `depth`, one nearness a texel, and `H`.
+// nearness the fire stands at. Cover comes in over a band of nearness above the fire's, and the band follows the
+// depth's own slope across `H.reach` of the frame: where the depth jumps, at the edge of a pole or a wall, the band
+// is crossed within a texel or two; where it only slopes, through the blur the depth map makes of branches against
+// the sky or along the ground under the fire, the edge fades over that distance instead of drawing the map's own
+// blotchy outline. The band stays between SOFT and WIDEST, so a solid object a little nearer than the fire is never
+// partly see-through. With no depth the map is one texel far behind everything and covers nothing. The bindings are
+// the including shader's: `depth`, a nearness and its slope per texel, and `H`.
 const SOFT = 0.04;
+const WIDEST = 0.3;
 const HOLDOUT = /* wgsl */ `
-struct Hold { nearness: f32 }
-fn depthAt(texel: vec2<i32>) -> f32 {
-  return textureLoad(depth, clamp(texel, vec2<i32>(0), vec2<i32>(textureDimensions(depth)) - vec2<i32>(1)), 0).x;
+struct Hold { nearness: f32, reach: f32 }
+fn depthAt(texel: vec2<i32>) -> vec2<f32> {
+  return textureLoad(depth, clamp(texel, vec2<i32>(0), vec2<i32>(textureDimensions(depth)) - vec2<i32>(1)), 0).xy;
 }
 fn coverAt(uv: vec2<f32>) -> f32 {
-  let at = uv * vec2<f32>(textureDimensions(depth)) - 0.5;
+  let size = vec2<f32>(textureDimensions(depth));
+  let at = uv * size - 0.5;
   let corner = vec2<i32>(floor(at));
   let f = fract(at);
-  let near = mix(
+  let here = mix(
     mix(depthAt(corner), depthAt(corner + vec2<i32>(1, 0)), f.x),
     mix(depthAt(corner + vec2<i32>(0, 1)), depthAt(corner + vec2<i32>(1, 1)), f.x),
     f.y
   );
-  let ahead = near - H.nearness;
-  return smoothstep(0.0, max(${SOFT}, 1.5 * fwidth(ahead)), ahead);
+  let ahead = here.x - H.nearness;
+  let band = clamp(here.y * H.reach * max(size.x, size.y), ${SOFT}, ${WIDEST});
+  return smoothstep(0.0, max(band, 1.5 * fwidth(ahead)), ahead);
 }
 `;
 

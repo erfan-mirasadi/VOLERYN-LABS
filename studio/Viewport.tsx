@@ -3,6 +3,7 @@
 import { presetById } from '@/presets/presets';
 import FireCanvas from './FireCanvas';
 import PlacementOverlay from './PlacementOverlay';
+import PlateTransport from './PlateTransport';
 import TimingHud from './TimingHud';
 import WindGizmo from './WindGizmo';
 import { useStudioStore } from './useStudioStore';
@@ -32,6 +33,7 @@ export default function Viewport() {
         <FireCanvas preset={presetById(presetId)} onEngine={setEngine} label="Fire simulation; drag to orbit" />
         {status === 'ready' && plate && <PlacementOverlay />}
         {status === 'ready' && <WindGizmo />}
+        {status === 'ready' && plate?.source instanceof HTMLVideoElement && <PlateTransport video={plate.source} />}
       </div>
       <div className="absolute left-3 top-3">
         <TimingHud />
