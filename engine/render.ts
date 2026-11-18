@@ -1,3 +1,4 @@
+import { type ColourModels, packColourModels } from './colour-models';
 import type { DepthMap } from './depth';
 import type { Plate } from './plate';
 import { COMPOSITE, DISPLAY, PRESENT, RENDER, RESOLVE } from './render-shaders';
@@ -105,7 +106,12 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   const noDepth = device.createTexture({ size: [1, 1], format: 'rg32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
   device.queue.writeTexture({ texture: noDepth }, new Float32Array([-1e4, 0]), { bytesPerRow: 8 }, [1, 1]);
   let depth = noDepth;
+  // The frame the depth was read from, texel for texel, and the colour models of either side of the fire.
+  const noColours = device.createTexture({ size: [1, 1], format: 'rgba8unorm-srgb', usage: GPUTextureUsage.TEXTURE_BINDING });
+  let colours = noColours;
   const holdBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const modelsBuffer = device.createBuffer({ size: packColourModels(null).byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(modelsBuffer, 0, packColourModels(null));
   const layersBuffer = (plate: number, tint: number) => {
     const buffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(buffer, 0, new Float32Array([plate, tint]));
@@ -183,6 +189,8 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
             { binding: 3, resource: depth.createView() },
             { binding: 4, resource: { buffer: holdBuffer } },
             { binding: 5, resource: { buffer: presentLayers } },
+            { binding: 6, resource: colours.createView() },
+            { binding: 7, resource: { buffer: modelsBuffer } },
           ],
         }),
       ),
@@ -296,21 +304,28 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
 
   // The depth of the plate's footage, or none, and where the fire stands in it: whatever is nearer than `nearness`
   // covers the fire. A map of another size takes a new texture, and the live targets go with the old one.
-  function setDepth(map: DepthMap | null, nearness: number, reach: number) {
+  function setDepth(map: DepthMap | null, nearness: number, reach: number, models: ColourModels | null) {
     const fits = map ? depth !== noDepth && depth.width === map.width && depth.height === map.height : depth === noDepth;
     if (!fits) {
       if (depth !== noDepth) depth.destroy();
-      depth = map ? device.createTexture({ size: [map.width, map.height], format: 'rg32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST }) : noDepth;
+      if (colours !== noColours) colours.destroy();
+      const make = (format: GPUTextureFormat) => device.createTexture({ size: [map!.width, map!.height], format, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      depth = map ? make('rg32float') : noDepth;
+      colours = map ? make('rgba8unorm-srgb') : noColours;
       disposeTargets();
       historyValid = false;
     }
-    if (map) device.queue.writeTexture({ texture: depth }, withSlope(map), { bytesPerRow: 8 * map.width }, [map.width, map.height]);
-    setHoldout(nearness, reach);
+    if (map) {
+      device.queue.writeTexture({ texture: depth }, withSlope(map), { bytesPerRow: 8 * map.width }, [map.width, map.height]);
+      device.queue.writeTexture({ texture: colours }, map.colour, { bytesPerRow: 4 * map.width }, [map.width, map.height]);
+    }
+    setHoldout(nearness, reach, models);
   }
 
   // `reach` is how far across the frame, as a share of its long side, the cover's soft edge may spread.
-  function setHoldout(nearness: number, reach: number) {
+  function setHoldout(nearness: number, reach: number, models: ColourModels | null) {
     device.queue.writeBuffer(holdBuffer, 0, new Float32Array([nearness, reach]));
+    device.queue.writeBuffer(modelsBuffer, 0, packColourModels(models));
   }
 
   function markCover(on: boolean) {
@@ -390,6 +405,8 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
         { binding: 5, resource: (holdout ? depth : noDepth).createView() },
         { binding: 6, resource: { buffer: holdBuffer } },
         { binding: 7, resource: { buffer: displayLayers } },
+        { binding: 8, resource: (holdout ? colours : noColours).createView() },
+        { binding: 9, resource: { buffer: modelsBuffer } },
       ],
     });
     fullscreenPass(encoder, display.createView(), displayPipeline, group);
@@ -431,8 +448,11 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
       if (plate !== noPlate) plate.destroy();
       noPlate.destroy();
       if (depth !== noDepth) depth.destroy();
+      if (colours !== noColours) colours.destroy();
       noDepth.destroy();
+      noColours.destroy();
       holdBuffer.destroy();
+      modelsBuffer.destroy();
       presentLayers.destroy();
       viewBuffer.destroy();
       blendBuffer.destroy();

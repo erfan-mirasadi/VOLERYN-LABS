@@ -15,7 +15,8 @@ const DEVIATION = [0.229, 0.224, 0.225];
 
 // Row-major values, width * height of them. From the model they are relative inverse depth, larger when nearer, on
 // a scale of its own; scaled to a shot they are nearness, 0 at the far end of the shot's first frame and 1 at its near end.
-export type DepthMap = { width: number; height: number; data: Float32Array<ArrayBuffer> };
+// `colour` is the frame the model read, as sRGB bytes four to a texel, texel for texel with the depth.
+export type DepthMap = { width: number; height: number; data: Float32Array<ArrayBuffer>; colour: Uint8ClampedArray<ArrayBuffer> };
 export type DepthEstimator = { estimate(source: CanvasImageSource, width: number, height: number, longSide: number): Promise<DepthMap> };
 
 let loading: Promise<DepthEstimator> | undefined;
@@ -60,7 +61,9 @@ async function createEstimator(onProgress: (fraction: number) => void): Promise<
     }
     const output = await session.run({ [session.inputNames[0]]: new ort.Tensor('float32', pixels, [1, 3, height, width]) });
     const depth = output[session.outputNames[0]];
-    return { width: depth.dims[depth.dims.length - 1], height: depth.dims[depth.dims.length - 2], data: Float32Array.from(depth.data as Float32Array) };
+    // The model answers at the size it read, so the frame's colours line up with its depth texel for texel.
+    if (depth.data.length !== area) throw new Error('The depth model answered at a size it was not given.');
+    return { width, height, data: Float32Array.from(depth.data as Float32Array), colour: rgba };
   }
 
   return {

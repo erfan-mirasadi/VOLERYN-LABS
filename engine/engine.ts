@@ -1,3 +1,4 @@
+import { type ColourModels, fitColourModels } from './colour-models';
 import { createDepthScale, DETAIL, type DepthEstimator, type DepthMap } from './depth';
 import { createFireSound, type FireSound } from './fire-sound';
 import { requestGpu } from './gpu';
@@ -80,7 +81,8 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   let framing: Framing = { x: 0, y: 0, scale: 1 };
   // The footage's depth while the user has it on: the estimator, the scale that ties every frame to the shot's
   // first, and the map of the frame the plate is showing.
-  let depth: { estimator: DepthEstimator; scale: ReturnType<typeof createDepthScale>; map: DepthMap | null } | null = null;
+  let depth: { estimator: DepthEstimator; scale: ReturnType<typeof createDepthScale>; map: DepthMap | null; models: ColourModels | null } | null = null;
+  let refitting = 0;
   let occlusion: Occlusion = { depth: 0.5, softness: 0.5, show: false };
   // The user holds a video plate on a frame; the engine keeps that when it moves the video itself.
   let platePaused = false;
@@ -150,7 +152,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       simulation = createSimulation(device, quality);
       renderer = createRenderer(device, format, simulation.volumes, quality);
       renderer.setPlate(plate);
-      renderer.setDepth(depth?.map ?? null, nearness(), reach());
+      renderer.setDepth(depth?.map ?? null, nearness(), reach(), depth?.models ?? null);
       renderer.markCover(occlusion.show);
       simulation.clear();
       startBurst();
@@ -279,7 +281,8 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     const map = depth.scale(await depth.estimator.estimate(source, plate.width, plate.height, longSide));
     if (run !== depthRun) return;
     depth.map = map;
-    renderer.setDepth(map, nearness(), reach());
+    depth.models = fitColourModels(map, nearness(), depth.models);
+    renderer.setDepth(map, nearness(), reach(), depth.models);
   }
 
   // A playing video's depth follows it as fast as the model runs at live detail, a few frames behind the picture,
@@ -309,10 +312,11 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     if (!plate || !depth) {
       // A run this one replaced may have left the video paused on its first frame.
       if (!exporting && !platePaused) void video?.play();
-      return renderer.setDepth(null, 0, reach());
+      return renderer.setDepth(null, 0, reach(), null);
     }
     depth.scale = createDepthScale();
     depth.map = null;
+    depth.models = null;
     if (!video) return readDepth(plate.source, run, DETAIL.full);
     const time = video.currentTime;
     video.pause();
@@ -442,13 +446,23 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     },
     // Turns the footage's depth on with an estimator, or off with none; resolves once the first frame's depth shows.
     setDepth(estimator: DepthEstimator | null) {
-      depth = estimator && { estimator, scale: createDepthScale(), map: null };
+      depth = estimator && { estimator, scale: createDepthScale(), map: null, models: null };
       return startDepth();
     },
     setOcclusion(next: Occlusion) {
+      const moved = next.depth !== occlusion.depth;
       occlusion = next;
       renderer.markCover(next.show);
-      renderer.setHoldout(nearness(), reach());
+      renderer.setHoldout(nearness(), reach(), depth?.models ?? null);
+      // Each side of the fire looks different once it stands elsewhere; a slider drag refits once a frame at most.
+      if (moved && depth?.map && !refitting) {
+        refitting = requestAnimationFrame(() => {
+          refitting = 0;
+          if (!depth?.map) return;
+          depth.models = fitColourModels(depth.map, nearness(), depth.models);
+          renderer.setHoldout(nearness(), reach(), depth.models);
+        });
+      }
     },
     // The nearness of the footage at a point of the frame, both from 0 to 1, or null with no depth to read.
     nearnessAt(u: number, v: number) {
@@ -586,6 +600,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       audio = null;
       running = false;
       cancelAnimationFrame(frame);
+      cancelAnimationFrame(refitting);
       resizeObserver.disconnect();
       visibilityObserver.disconnect();
       document.removeEventListener('visibilitychange', onVisibilityChange);

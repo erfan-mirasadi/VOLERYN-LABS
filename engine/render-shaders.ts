@@ -38,22 +38,46 @@ const LAYERS = /* wgsl */ `
 struct Layers { plate: f32, tint: f32 }
 `;
 
-// How much of the fire the footage's foreground covers: the plate's depth, read between its texels, against the
-// nearness the fire stands at. Cover comes in over a band of nearness above the fire's, and the band follows the
-// depth's own slope across `H.reach` of the frame: where the depth jumps, at the edge of a pole or a wall, the band
-// is crossed within a texel or two; where it only slopes, through the blur the depth map makes of branches against
-// the sky or along the ground under the fire, the edge fades over that distance instead of drawing the map's own
-// blotchy outline. The band stays between SOFT and WIDEST, so a solid object a little nearer than the fire is never
-// partly see-through. With no depth the map is one texel far behind everything and covers nothing. The bindings are
-// the including shader's: `depth`, a nearness and its slope per texel, and `H`.
+// How much of the fire the footage's foreground covers. The depth says it first: cover comes in over a band of
+// nearness above the fire's, and the band follows the depth's own slope across `H.reach` of the frame, so it is
+// crossed within a texel or two where the depth jumps and fades where the depth only slopes. The band stays between
+// SOFT and WIDEST, so a solid object a little nearer than the fire is never partly see-through.
+// Colour has the last word where it is sure. The depth map is a few plate pixels to the texel; branches against the
+// sky or a railing's bars come out of it as one near blur. `M` holds a colour model of each side of the fire, and a
+// pixel whose colour is far likelier on one side than the other goes there, at the plate's own sharpness. Where the
+// two sides share colours the depth decides alone, and where a pixel looks like the texel the depth was read from,
+// the depth keeps its full say: only detail finer than the depth map is the colour's to place. Colour can take cover
+// away anywhere the depth gives it, and add it only close to the fire's depth, so a dark building far behind the fire
+// never comes forward because a near branch is dark too. With no depth the map is one texel far behind everything
+// and covers nothing. The bindings are the including shader's: `depth`, a nearness and its slope per texel; `colours`,
+// the frame the depth was read from; `lin`, `H` and `M`.
 const SOFT = 0.04;
 const WIDEST = 0.3;
+// How closely a pixel has to match its depth texel's colour, as the square root of linear light, to be the depth's.
+const LIKE_TEXEL = 0.1;
+// How much the colour evidence counts against the depth's, in log-odds per unit of log-likelihood ratio.
+const COLOUR = 0.75;
 const HOLDOUT = /* wgsl */ `
 struct Hold { nearness: f32, reach: f32 }
+struct Part { mean: vec4<f32>, spread: vec4<f32> }
+struct Mixtures { parts: array<Part, 10> }
 fn depthAt(texel: vec2<i32>) -> vec2<f32> {
   return textureLoad(depth, clamp(texel, vec2<i32>(0), vec2<i32>(textureDimensions(depth)) - vec2<i32>(1)), 0).xy;
 }
-fn coverAt(uv: vec2<f32>) -> f32 {
+fn likelihood(c: vec3<f32>, first: u32) -> f32 {
+  var terms: array<f32, 5>;
+  var best = -1e30;
+  for (var k = 0u; k < 5u; k++) {
+    let part = M.parts[first + k];
+    let d = c - part.mean.xyz;
+    terms[k] = part.mean.w + part.spread.w - 0.5 * dot(d * d, 1.0 / part.spread.xyz);
+    best = max(best, terms[k]);
+  }
+  var sum = 0.0;
+  for (var k = 0u; k < 5u; k++) { sum += exp(terms[k] - best); }
+  return best + log(sum);
+}
+fn coverAt(uv: vec2<f32>, plate: vec3<f32>) -> f32 {
   let size = vec2<f32>(textureDimensions(depth));
   let at = uv * size - 0.5;
   let corner = vec2<i32>(floor(at));
@@ -65,7 +89,15 @@ fn coverAt(uv: vec2<f32>) -> f32 {
   );
   let ahead = here.x - H.nearness;
   let band = clamp(here.y * H.reach * max(size.x, size.y), ${SOFT}, ${WIDEST});
-  return smoothstep(0.0, max(band, 1.5 * fwidth(ahead)), ahead);
+  let fromDepth = clamp(smoothstep(0.0, max(band, 1.5 * fwidth(ahead)), ahead), 0.02, 0.98);
+  let colour = sqrt(max(plate, vec3<f32>(0.0)));
+  let texel = sqrt(max(textureSampleLevel(colours, lin, uv, 0.0).rgb, vec3<f32>(0.0)));
+  let likeTexel = exp(-dot(colour - texel, colour - texel) / ${(2 * LIKE_TEXEL * LIKE_TEXEL).toFixed(4)});
+  let evidence = clamp(likelihood(colour, 0u) - likelihood(colour, 5u), -12.0, 12.0);
+  let say = max(likeTexel, 1.0 - smoothstep(2.0, 6.0, abs(evidence)));
+  let odds = say * log(fromDepth / (1.0 - fromDepth)) + ${COLOUR} * evidence;
+  let zone = smoothstep(H.nearness - 0.08, H.nearness, here.x);
+  return zone * clamp((1.0 / (1.0 + exp(-odds)) - 0.02) / 0.96, 0.0, 1.0);
 }
 `;
 
@@ -356,6 +388,8 @@ export const DISPLAY = TONEMAP + LAYERS + HOLDOUT + /* wgsl */ `
 @group(0) @binding(5) var depth: texture_2d<f32>;
 @group(0) @binding(6) var<uniform> H: Hold;
 @group(0) @binding(7) var<uniform> L: Layers;
+@group(0) @binding(8) var colours: texture_2d<f32>;
+@group(0) @binding(9) var<uniform> M: Mixtures;
 ` + FULLSCREEN_VS + /* wgsl */ `
 @fragment
 fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
@@ -364,7 +398,7 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let frame = vec4<f32>(tonemap(f.rgb + textureLoad(firelight, p, 0).rgb + textureLoad(smoke, p, 0).rgb), f.a);
   let uv = frag.xy / vec2<f32>(textureDimensions(fire));
   let behind = textureSampleLevel(plate, lin, uv, 0.0);
-  return over(frame, vec4<f32>(behind.rgb, behind.a * L.plate), coverAt(uv));
+  return over(frame, vec4<f32>(behind.rgb, behind.a * L.plate), coverAt(uv, behind.rgb));
 }`;
 
 // Temporal blend of the jittered raymarch with the last frame, the history clamped to the current neighbourhood so it cannot ghost.
@@ -420,10 +454,12 @@ const COVER_TINT = vec3<f32>(0.0, 0.62, 1.0);
 @group(0) @binding(3) var depth: texture_2d<f32>;
 @group(0) @binding(4) var<uniform> H: Hold;
 @group(0) @binding(5) var<uniform> L: Layers;
+@group(0) @binding(6) var colours: texture_2d<f32>;
+@group(0) @binding(7) var<uniform> M: Mixtures;
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
   let behind = textureSampleLevel(plate, lin, in.uv, 0.0);
-  let cover = coverAt(in.uv);
+  let cover = coverAt(in.uv, behind.rgb);
   let shown = over(textureSampleLevel(src, lin, in.uv, 0.0), behind, cover);
   return vec4<f32>(mix(shown.rgb, COVER_TINT, 0.5 * cover * L.tint), shown.a);
 }`;

@@ -158,7 +158,7 @@ function sidecarFor({ preset, tweaks, boxes, orbit, framing, plate, occlusion, g
         composited: Boolean(job.plate),
         ...(occlusion && {
           occlusion: job.holdout
-            ? { ...occlusion, model: DEPTH_MODEL.name, detail: DETAIL.full, matte: 'the footage’s depth cut at the fire; applied to the display image' }
+            ? { ...occlusion, model: DEPTH_MODEL.name, detail: DETAIL.full, matte: 'the footage’s depth cut at the fire, with colour models of either side placing what is finer than the depth map; applied to the display image' }
             : { ...occlusion, note: 'not applied: the EXR layers are the fire alone' },
         }),
       },
