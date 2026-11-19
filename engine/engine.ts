@@ -6,7 +6,7 @@ import { GpuTimer } from './gpu-timer';
 import { type OfflineJob, type RenderedFrame, renderOffline } from './offline-render';
 import { type Plate, seekPlate } from './plate';
 import { type Camera, cameraBasis, createRenderer, type Vec3 } from './render';
-import { BLAST_DECAY, type Box, BURST_EVERY, DT, MAX_BOXES, type Preset, QUALITIES, type Quality, type Tweaks } from './scene';
+import { BLAST_DECAY, type Box, BURST_EVERY, DT, defaultTweaks, MAX_BOXES, type Preset, QUALITIES, type Quality, type Tweaks } from './scene';
 import { createSimulation } from './simulation';
 
 // The canvas builds its engine once, when it mounts, so a hot update to the engine's code would leave the running
@@ -72,7 +72,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
   const timer = new GpuTimer(device, hasTimestamps);
 
   let preset = initialPreset;
-  let tweaks: Tweaks = { heat: 1, vorticity: initialPreset.vorticity, wind: 0, windYaw: 0, seed: 0, blue: initialPreset.blue, sparks: initialPreset.sparks, smoke: 1, width: 1 };
+  let tweaks: Tweaks = defaultTweaks(initialPreset);
   let boxes: Box[] = initialPreset.objects?.map((box) => ({ ...box })) ?? [];
   let simTime = 0;
   let burstStart = 0;
@@ -193,7 +193,6 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
 
   // One simulation step of dt seconds; a live explosion re-arms its charge every BURST_EVERY seconds, an exported one goes off once.
   function advance(pass: GPUComputePassEncoder, dt: number, slot = 0, next?: () => GPUComputePassEncoder) {
-    if (!exporting && preset.mode === 'explosion' && simTime - burstStart > BURST_EVERY) startBurst();
     const age = simTime - burstStart;
     const emitting = preset.mode !== 'explosion' || age < (preset.burst ?? 0);
     const blast = preset.mode === 'explosion' ? (preset.blast ?? 0) * Math.exp(-age / BLAST_DECAY) : 0;
@@ -224,6 +223,13 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       spinPolar *= 0.9;
     }
 
+    // Re-arm before encoding either step: clear() submits its own buffer and must precede the whole tick.
+    // A wind-following explosion window returns to the source for the next charge.
+    if (preset.mode === 'explosion' && simTime - burstStart > BURST_EVERY) {
+      simulation.clear();
+      renderer.resetHistory();
+      startBurst();
+    }
     const encoder = device.createCommandEncoder();
     const simulationPass = encoder.beginComputePass({ timestampWrites: timer.timestamps('simulation') });
     for (let n = 0; accumulator >= DT && n < 2; n++) {
@@ -247,6 +253,8 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
       camera: camera(),
       preset,
       blue: tweaks.blue,
+      tweaks,
+      offset: simulation.offset,
       time: simTime,
       index: frameIndex++,
       scalarIndex: simulation.scalarIndex,
@@ -404,7 +412,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     lost: onDeviceLost,
     setPreset(next: Preset) {
       preset = next;
-      tweaks = { ...tweaks, heat: 1, vorticity: next.vorticity, wind: 0, blue: next.blue, sparks: next.sparks, smoke: 1, width: 1 };
+      tweaks = { ...defaultTweaks(next), seed: tweaks.seed, windYaw: tweaks.windYaw };
       boxes = next.objects?.map((box) => ({ ...box })) ?? [];
       simulation.clear();
       renderer.resetHistory();
@@ -413,7 +421,15 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
     },
     setTweaks(next: Partial<Tweaks>) {
       tweaks = { ...tweaks, ...next };
+      renderer.resetHistory();
       sound?.scene(preset, tweaks, boxes);
+    },
+    // Replays the same seed and settings, including a single explosion charge.
+    restart() {
+      simulation.clear();
+      simTime = burstStart = accumulator = 0;
+      renderer.resetHistory();
+      startBurst();
     },
     addBox(box: Box) {
       boxes = [...boxes, box].slice(-MAX_BOXES);
@@ -571,7 +587,7 @@ export async function createEngine(canvas: HTMLCanvasElement, initialPreset: Pre
         }
         simulation.clear();
         simTime = burstStart = 0;
-        await renderOffline({ device, context, canvas, simulation, renderer, preset, blue: tweaks.blue, step, showPlate }, job, onFrame, signal);
+        await renderOffline({ device, context, canvas, simulation, renderer, preset, blue: tweaks.blue, tweaks: { ...tweaks }, step, showPlate }, job, onFrame, signal);
       } finally {
         exporting = false;
         if (playing) void resumePlate(playing, resumeAt);

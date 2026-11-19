@@ -2,7 +2,9 @@ import type { Engine } from '@/engine/engine';
 import { fitCamera, fitToContent, type Fps, loopOverlap, type OfflineJob, type RenderedFrame, substepsFor } from '@/engine/offline-render';
 import { DEPTH_MODEL, DETAIL } from '@/engine/depth';
 import { exportMarch } from '@/engine/render';
-import { RENDER_GRID } from '@/engine/scene';
+import { GRID, RENDER_GRID } from '@/engine/scene';
+import { FIRE_RADIANCE } from '@/engine/blackbody';
+import type { Vec3 } from '@/engine/render';
 import { encodeExr } from './exr';
 import type { Destination } from './files';
 import { createSheet, MOTION_RANGE } from './flipbook';
@@ -40,6 +42,7 @@ export type ExportSettings = {
   // How long the shutter stays open, as a share of the frame interval: 180 degrees or none.
   shutter: 0 | 0.5;
   samples: 4 | 16 | 32 | 64;
+  fidelity: 'draft' | 'final';
   loop: boolean;
   // With footage loaded: the fire laid over it, or the fire alone on the footage's frame.
   footage: 'composite' | 'off';
@@ -58,6 +61,7 @@ export const DEFAULT_SETTINGS: ExportSettings = {
   motion: 'unreal',
   shutter: 0.5,
   samples: 16,
+  fidelity: 'final',
   loop: false,
   footage: 'composite',
 };
@@ -88,6 +92,11 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
   const { cols, rows, cells, stride } = flipbookTiming(settings);
   const footage = flipbook ? null : snapshot.plate;
   const [width, height] = flipbook ? [settings.cell, settings.cell] : footage ? footageSize(footage) : settings.size.split('x').map(Number);
+  // A moving explosion can travel outside the initial domain. The coarse content probe must see the whole path.
+  const clipSeconds = flipbook ? cells * stride / FLIPBOOK_FPS : settings.seconds;
+  const travelDistance = explosion ? snapshot.tweaks.wind * (1 + snapshot.tweaks.windGust) * clipSeconds / GRID[0] : 0;
+  const heading = snapshot.tweaks.windYaw * Math.PI / 180;
+  const travel: Vec3 = [travelDistance * Math.cos(heading), 0, travelDistance * Math.sin(heading)];
   const job: OfflineJob = {
     width,
     height,
@@ -96,11 +105,11 @@ export async function runExport(engine: Engine, settings: ExportSettings, destin
     stride: flipbook ? stride : 1,
     warmup: explosion ? 0 : WARMUP,
     samples: settings.samples,
-    camera: flipbook ? fitCamera(snapshot.camera.eye, FLIPBOOK_FOV) : snapshot.camera,
+    camera: flipbook ? fitCamera(snapshot.camera.eye, FLIPBOOK_FOV, 0.92, travel) : snapshot.camera,
     loop: settings.loop && !explosion,
     read: exr ? ['fire', 'firelight', 'smoke', 'data'] : flipbook && settings.motion !== 'off' ? ['display', 'data'] : ['display'],
     shutter: settings.shutter,
-    simulation: RENDER_GRID,
+    simulation: settings.fidelity === 'draft' ? { grid: [128, 192, 128], lightScale: 4 } : RENDER_GRID,
     plate: Boolean(footage) && !exr && settings.footage === 'composite',
     holdout: Boolean(footage && snapshot.occlusion) && !exr,
   };
@@ -147,7 +156,8 @@ function sidecarFor({ preset, tweaks, boxes, orbit, framing, plate, occlusion, g
   const overlap = job.loop ? loopOverlap(job.frames, grid) : 0;
   return {
     app: 'Voleryn Labs',
-    version: 1,
+    version: 2,
+    renderer: 'volumetric-soot-v2',
     preset,
     tweaks,
     boxes,
@@ -178,6 +188,8 @@ function sidecarFor({ preset, tweaks, boxes, orbit, framing, plate, occlusion, g
       shutter: job.shutter,
       grid: [...grid],
       stepCells: exportMarch(grid).stepCells,
+      domain: preset.mode === 'explosion' ? 'wind-following simulation window; world-space velocities and fixed source origin' : 'stationary simulation domain',
+      emissionCalibration: FIRE_RADIANCE,
       loop: {
         overlap,
         method: 'field-space crossfade',
@@ -218,7 +230,8 @@ function outputNotes(settings: ExportSettings, exr: boolean, composited: boolean
     return {
       mode: settings.mode,
       format: 'exr',
-      colour: 'scene-linear Rec.709/D65, premultiplied; RGB = fire + firelight + smoke; Z planar camera depth, far 1e10; forward.u/v pixels per frame, +v up; temperature in simulation units',
+      colour: 'scene-linear Rec.709/D65, premultiplied; RGB = fire + firelight + smoke; Z planar camera depth, far 1e10; forward.u/v pixels per frame, +v up; temperature in normalized simulation units',
+      temperatureCalibration: 'K = 1000 + (referenceK - 1000) * (1 - exp(-max(heat, 0))) / (1 - exp(-1)); referenceK is tweaks.temperature',
     };
   }
   const over = composited ? 'the footage, composited in linear light' : 'black';

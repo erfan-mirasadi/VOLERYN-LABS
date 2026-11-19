@@ -1,11 +1,9 @@
-import { TONEMAP } from './render-shaders';
-import { DT } from './scene';
 import { BLACKBODY, HEADER, PARAMS_STRUCT, SOLIDS, TRACE } from './simulation-shaders';
 
 export const SPARK_COUNT = 16384;
 // A fresh spark's temperature and the one it goes out at, on the flame's blackbody scale.
-const SPARK_HEAT = 1.25;
-const SPARK_OUT = 0.45;
+const SPARK_HEAT = 1.65;
+const SPARK_OUT = 0.30;
 
 // One spark: position and velocity in grid cells, age and lifetime in seconds. Dead once its age reaches its life.
 const SPARK_STRUCT = /* wgsl */ `
@@ -18,18 +16,17 @@ struct Spark { pos: vec3<f32>, age: f32, vel: vec3<f32>, life: f32 }
 // back the same sparks every time.
 export const SPARK_STEP = HEADER + SPARK_STRUCT + /* wgsl */ `
 // Per-spark spawn chance per second, the burst an explosion throws per unit of blast, and the sparks slider.
-struct Spawn { rate: f32, burst: f32, strength: f32, pad: f32 }
+struct Spawn { rate: f32, burst: f32, strength: f32, size: f32, life: f32 }
 @group(0) @binding(1) var<storage, read_write> sparks: array<Spark, ${SPARK_COUNT}>;
 @group(0) @binding(2) var vel: texture_3d<f32>;
 @group(0) @binding(3) var sca: texture_3d<f32>;
 @group(0) @binding(4) var lin: sampler;
 @group(0) @binding(5) var<uniform> S: Spawn;
 ${TRACE}
-// Seconds a spark takes to pick up the gas velocity, how fast it sinks through the gas in base cells/s², the random
-// tumble it adds each step, and the pop that throws it out of the fuel, in base cells/s.
-const DRAG = 0.25;
-const SETTLE = 30.0;
-const TUMBLE = 30.0;
+// Gravity and smooth aerodynamic flutter in base cells/s², and the pop that throws a fragment out of the fuel
+// in base cells/s. Its response to the gas depends on its individual size.
+const GRAVITY = 85.0;
+const TUMBLE = 8.0;
 const POP = 80.0;
 const POP_UP = 25.0;
 const BURST_SPEED = 220.0;
@@ -40,8 +37,8 @@ const SKIN = 2.5;
 const POP_EVERY = 0.5;
 const POP_WINDOW = 0.12;
 const POP_CHANCE = 0.7;
-const POP_MIN = 60.0;
-const POP_MAX = 200.0;
+const POP_MIN = 18.0;
+const POP_MAX = 75.0;
 const POP_THROW = 140.0;
 
 fn pcg(v: u32) -> u32 {
@@ -82,10 +79,15 @@ fn pickBox(u: f32) -> i32 {
   }
   return -1;
 }
-// Where a spark may be born, before the burning test: in the column above the emitter, or in objects mode the
-// skin of one of the boxes half the time and anywhere in the box the other half, for the flames above the logs.
+// Where a spark may be born, before the burning test. An explosion samples the local domain because its moving
+// window may have left the original charge behind. Other flames use the source column or the objects' skin.
 fn candidate(base: u32, k: u32) -> vec3<f32> {
   let u = vec3<f32>(rand(base, k), rand(base, k + 1u), rand(base, k + 2u));
+  if (P.mode == 2.0) {
+    // Rejection by burning() finds occupied hot gas anywhere in the moving window; the old world-space source
+    // can be outside it after the blast. No emitter-centred sampling volume follows that source out of the grid.
+    return u * (P.size - vec3<f32>(1.0));
+  }
   if (P.mode != 3.0) { return columnPoint(u); }
   if (rand(base, k + 4u) < 0.5) { return vec3<f32>(u.x * P.size.x, pow(u.y, 1.5) * 0.85 * P.size.y, u.z * P.size.z); }
   let i = pickBox(rand(base, k + 3u));
@@ -105,14 +107,27 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   var s = sparks[i];
   let base = pcg(i ^ pcg(bitcast<u32>(P.time) ^ pcg(bitcast<u32>(P.seed) + 0x9e3779b9u)));
   let cells = cellScale();
+  // Small embers entrain in the gas quickly; heavier fragments keep their ballistic launch and settle.
+  // The same stable size class also controls projected area and cooling in the draw pass.
+  let material = pcg(i ^ pcg(bitcast<u32>(P.seed) + 0x68bc21ebu));
+  let grain = rand(material, 0u);
+  let size = S.size * (0.45 + 1.8 * grain * grain * grain);
+  let dragTime = clamp(0.06 + 0.3 * size * size, 0.04, 1.6);
   if (s.age < s.life) {
-    var v = mix(s.vel, velocityAt(s.pos), 1.0 - exp(-P.dt / DRAG));
-    v.y -= SETTLE * cells * P.dt;
-    v += (vec3<f32>(rand(base, 0u), rand(base, 1u), rand(base, 2u)) - vec3<f32>(0.5)) * TUMBLE * cells * sqrt(P.dt);
-    s.pos += v * P.dt;
+    // Fragments can leave the fluid grid without disappearing. Outside it the unresolved air is ambient wind;
+    // sampling a clamped edge texel would instead pin them to the last hot or fast cell on that boundary.
+    var gas = P.wind;
+    if (insideBox(s.pos)) { gas = velocityAt(s.pos); }
+    var v = mix(s.vel, gas, 1.0 - exp(-P.dt / dragTime));
+    v.y -= GRAVITY * cells * P.dt;
+    let phase = vec3<f32>(rand(material, 1u), rand(material, 2u), rand(material, 3u)) * 6.2831853;
+    v += sin(vec3<f32>(7.1, 9.3, 5.7) * P.time + phase) * TUMBLE * cells * P.dt / sqrt(max(size, 0.1));
+    // Position is local to the translating computational window. Velocity remains in the world frame for
+    // gas entrainment, ballistic inertia and the camera shutter; subtract only the window's transport here.
+    s.pos += (v - P.transport) * P.dt;
     s.vel = v;
     s.age += P.dt;
-    if (!insideBox(s.pos) || isSolid(s.pos)) { s.age = s.life; }
+    if (s.pos.y < -0.5 || isSolid(s.pos)) { s.age = s.life; }
     sparks[i] = s;
     return;
   }
@@ -129,14 +144,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       let r = rand(base, 64u);
       s.pos = p;
       s.vel = velocityAt(p) + (kick * (0.3 + 0.7 * rand(base, 65u)) + unitVector(rand(base, 66u), rand(base, 67u)) * 0.4) * POP_THROW * cells;
-      s.life = 1.0 + 2.5 * r * r;
+      s.life = S.life * sqrt(size) * (0.5 + 1.9 * r * r);
       s.age = 0.0;
       sparks[i] = s;
       return;
     }
   }
   if (rand(base, 0u) < S.rate * P.dt) {
-    for (var k = 0u; k < 4u; k++) {
+    let attempts = select(4u, 12u, P.mode == 2.0);
+    for (var k = 0u; k < attempts; k++) {
       let p = candidate(base, 40u + 5u * k);
       if (!insideBox(p) || !burning(p)) { continue; }
       // Most pops are gentle, a few fling the spark well clear of the flame.
@@ -144,7 +160,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       let pop = rand(base, 27u);
       s.pos = p;
       s.vel = velocityAt(p) + unitVector(rand(base, 25u), rand(base, 26u)) * POP * cells * pop * pop + vec3<f32>(0.0, POP_UP * cells * (0.5 + rand(base, 28u)), 0.0);
-      s.life = 1.2 + 2.8 * r * r;
+      s.life = S.life * sqrt(size) * (0.45 + 2.2 * r * r);
       s.age = 0.0;
       sparks[i] = s;
       return;
@@ -155,7 +171,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let speed = rand(base, 5u);
     s.pos = P.emitter + dir * P.radius * vec3<f32>(P.width, 1.0, P.width) * 0.8 * pow(rand(base, 4u), 1.0 / 3.0);
     s.vel = dir * BURST_SPEED * cells * (0.15 + 0.85 * speed * speed) + vec3<f32>(0.0, BURST_UP * cells, 0.0);
-    s.life = 0.8 + 2.4 * rand(base, 6u);
+    s.life = S.life * sqrt(size) * (0.35 + 1.8 * rand(base, 6u));
     s.age = 0.0;
     sparks[i] = s;
   }
@@ -164,7 +180,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 // Draws each live spark as a tiny point of blackbody colour with a faint bloom, shrinking as it burns down; the few
 // big fragments and the rare defocused ember are larger and dimmer, a fast one smears into a thin streak, and all are
 // dimmed by the smoke and flame between them and the camera. One quad per spark, strip order.
-export const SPARK_DRAW = BLACKBODY + TONEMAP + SPARK_STRUCT + /* wgsl */ `
+export const SPARK_DRAW = BLACKBODY + SPARK_STRUCT + /* wgsl */ `
 struct View {
   camPos: vec3<f32>,
   tanHalf: f32,
@@ -192,6 +208,7 @@ struct View {
   timeOffset: f32,
   pad: f32,
   shift: vec2<f32>,
+  appearance: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> V: View;
 ` + PARAMS_STRUCT + /* wgsl */ `
@@ -203,9 +220,10 @@ struct View {
 struct Fade { weight: f32 }
 @group(0) @binding(5) var<uniform> F: Fade;
 ` + SOLIDS + /* wgsl */ `
-// Seconds of motion a streak shows, the brightness of a fresh spark, and the steps of the occlusion march.
-const STREAK = ${(2 * DT).toFixed(5)};
-const GAIN = 3.0;
+// Preview integrates a short exposure analytically. Export samples the selected shutter in time, so it must
+// draw a point at each sample instead of blurring the particle a second time (or blurring when the shutter is off).
+const PREVIEW_SHUTTER = 0.0083333;
+const GAIN = 2.2;
 const OCCLUSION_STEPS = 20;
 const HEAT = ${SPARK_HEAT.toFixed(2)};
 const COOLING = ${Math.log(SPARK_HEAT / SPARK_OUT).toFixed(4)};
@@ -219,7 +237,12 @@ struct Out {
 }
 
 fn toWorld(cells: vec3<f32>) -> vec3<f32> { return V.boxMin + (cells + vec3<f32>(0.5)) / P.size * (V.boxMax - V.boxMin); }
-fn hash(i: u32, k: f32) -> f32 { return fract(sin(f32(i % 4096u) * 12.9898 + k * 78.233) * 43758.5453); }
+fn pcg(v: u32) -> u32 {
+  let state = v * 747796405u + 2891336453u;
+  let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  return (word >> 22u) ^ word;
+}
+fn rand(base: u32, k: u32) -> f32 { return f32(pcg(base + k)) / 4294967296.0; }
 // Pixel coordinates of a world point, shifted by the sample's jitter the way the raymarch's rays are.
 fn toPixel(p: vec3<f32>) -> vec2<f32> {
   let r = p - V.camPos;
@@ -227,23 +250,35 @@ fn toPixel(p: vec3<f32>) -> vec2<f32> {
   let ndc = vec2<f32>(dot(r, V.right) / (z * V.tanHalf * V.aspect), dot(r, V.up) / (z * V.tanHalf)) + V.shift;
   return vec2<f32>(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y) * V.viewport.zw + V.viewport.xy;
 }
-// The flame's opaque core; its warm fringe and the plume above glow but let a spark show through.
-fn core(t: f32) -> f32 { return smoothstep(0.6, 1.2, t); }
 // Transmittance from the spark to the camera through the smoke and the flame's core, 0 behind a solid.
 fn transmittance(p: vec3<f32>) -> f32 {
-  let dir = normalize(V.camPos - p);
-  let inv = 1.0 / dir;
-  let t0 = (V.boxMin - p) * inv;
-  let t1 = (V.boxMax - p) * inv;
-  let tExit = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
-  let span = tExit / f32(OCCLUSION_STEPS);
+  let toCamera = V.camPos - p;
+  let distanceToCamera = length(toCamera);
+  let dir = toCamera / max(distanceToCamera, 1e-6);
+  // Integrate only the ray segment inside the actual fluid volume. This also works for a ballistic fragment
+  // outside the moving box: a ray that misses it is clear, while one crossing the plume still loses light.
+  var enter = 0.0;
+  var leave = distanceToCamera;
+  for (var axis = 0; axis < 3; axis++) {
+    if (abs(dir[axis]) < 1e-6) {
+      if (p[axis] < V.boxMin[axis] || p[axis] > V.boxMax[axis]) { return 1.0; }
+    } else {
+      let near = (V.boxMin[axis] - p[axis]) / dir[axis];
+      let far = (V.boxMax[axis] - p[axis]) / dir[axis];
+      enter = max(enter, min(near, far));
+      leave = min(leave, max(near, far));
+    }
+  }
+  if (leave <= enter) { return 1.0; }
+  let span = (leave - enter) / f32(OCCLUSION_STEPS);
   let size = V.boxMax - V.boxMin;
   var depth = 0.0;
   for (var k = 0; k < OCCLUSION_STEPS; k++) {
-    let q = (p + dir * (f32(k) + 0.5) * span - V.boxMin) / size;
+    let q = (p + dir * (enter + (f32(k) + 0.5) * span) - V.boxMin) / size;
     if (P.mode == 3.0 && solidDistance(q * P.size - vec3<f32>(0.5)) < 0.0) { return 0.0; }
     let s = textureSampleLevel(sca, lin, q, 0.0);
-    depth += (s.x * V.density + max(V.fireDensity, 24.0) * core(s.y)) * span;
+    let incandescentSoot = 0.12 * V.fireDensity * min(1.5, 0.35 * s.x + 0.015 * s.w) * flame(s.y);
+    depth += (s.x * V.density + incandescentSoot) * span;
   }
   return exp(-depth);
 }
@@ -253,37 +288,42 @@ fn vs(@builtin(vertex_index) corner: u32, @builtin(instance_index) i: u32) -> Ou
   var out: Out;
   out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
   let s = sparks[i];
-  if (s.age >= s.life) { return out; }
-  let p = toWorld(s.pos);
-  if (dot(p - V.camPos, V.forward) < 0.05) { return out; }
+  let age = s.age - V.timeOffset;
+  if (age < 0.0 || age >= s.life) { return out; }
+  let p = toWorld(s.pos - s.vel * V.timeOffset);
+  let distanceToCamera = dot(p - V.camPos, V.forward);
+  if (distanceToCamera < 0.05) { return out; }
+  let material = pcg(i ^ pcg(bitcast<u32>(P.seed) + 0x68bc21ebu));
+  let grain = rand(material, 0u);
+  let lived = age / s.life;
   let head = toPixel(p);
-  let tail = toPixel(p - s.vel / P.size.x * STREAK);
-  let scale = max(0.6, min(V.viewport.z, V.viewport.w) / 1080.0);
-  let lived = s.age / s.life;
-  // Most sparks are a point under a pixel wide that shrinks as it burns down; a few are bigger fragments, and the rare
-  // one the lens does not focus is a soft blob. None is drawn smaller than a pixel, so it does not flicker as it
-  // crosses pixels; its light is scaled down to its true size instead.
-  let u = hash(i, 1.0);
-  let size = (0.55 + 0.35 * u * u + 1.4 * pow(u, 10.0)) * scale * (0.7 + 0.3 * (1.0 - lived));
-  let radius = max(size, 0.85);
+  let worldVelocity = s.vel / P.size * (V.boxMax - V.boxMin);
+  let shutter = select(PREVIEW_SHUTTER, 0.0, V.frameTime > 0.0);
+  let tail = toPixel(p - worldVelocity * shutter);
+  // A world-space fragment becomes smaller with distance and grows when the lens zooms in. Subpixel fragments
+  // keep a smooth reconstruction footprint, with their energy reduced by their actual projected area.
+  let physicalRadius = 0.00042 * V.appearance.z * (0.45 + 1.8 * grain * grain * grain) * (1.0 - 0.45 * lived);
+  let projected = physicalRadius * 0.5 * V.viewport.w / (distanceToCamera * V.tanHalf);
+  let radius = max(projected, 0.65);
   let travel = distance(head, tail);
-  let len = min(travel, 6.0 * radius);
   let along = select((tail - head) / max(travel, 1e-3), vec2<f32>(1.0, 0.0), travel < 1e-3);
-  let tip = head + along * len;
   let across = vec2<f32>(-along.y, along.x);
   let reach = 3.0 * radius;
-  let end = select(head - along * reach, tip + along * reach, corner >= 2u);
+  let end = select(head - along * reach, tail + along * reach, corner >= 2u);
   let px = end + across * select(reach, -reach, (corner & 1u) == 1u);
   out.position = vec4<f32>(px / V.viewport.zw * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.5, 1.0);
-  // Cools from yellow-orange to dull red over its life, twinkles as it tumbles, and winks out at the end.
-  let heat = HEAT * (0.8 + 0.4 * hash(i, 2.0)) * exp(-COOLING * lived);
-  let flicker = 0.75 + 0.25 * hash(i, floor(V.frame / 2.0));
+  let heat = HEAT * (0.78 + 0.48 * rand(material, 4u)) * exp(-COOLING * lived);
+  // Aerodynamic tumble changes apparent emitting area smoothly; it does not choose a new random colour per frame.
+  let phase = 6.2831853 * rand(material, 5u);
+  let flicker = 0.72 + 0.18 * sin(age * (9.0 + 15.0 * rand(material, 6u)) + phase)
+    + 0.10 * sin(age * (21.0 + 17.0 * rand(material, 7u)) + phase);
   let seen = transmittance(p) * F.weight;
-  // A big blurred ember spreads its light thin, a tiny one gives off less, and a fast one smears it along its streak.
-  let spread = pow(size / scale, 1.5) * (radius * radius) / (size * size) * (1.0 + 0.2 * len / radius);
-  let glow = blackbody(heat) * smoothstep(1.0, 0.85, lived) * GAIN * (0.5 + hash(i, 3.0)) * flicker * V.exposure * seen / spread;
-  out.segment = vec4<f32>(head, tip);
-  out.colour = vec4<f32>(glow, radius);
+  let area = min(1.0, projected * projected / (radius * radius));
+  let smear = 1.0 + travel / (2.0 * radius);
+  let fade = smoothstep(0.0, 0.035, age) * (1.0 - smoothstep(0.72, 1.0, lived));
+  let emission = blackbody(heat) * GAIN * flicker * fade * area * V.exposure * seen / smear;
+  out.segment = vec4<f32>(head, tail);
+  out.colour = vec4<f32>(emission, radius);
   out.seen = seen;
   return out;
 }
@@ -294,18 +334,19 @@ fn profile(in: Out) -> f32 {
   let t = clamp(dot(in.position.xy - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
   let d = distance(in.position.xy, a + ab * t) / in.colour.w;
   // A tight bright core with the faint bloom of a hot point.
-  return exp(-2.5 * d * d) + 0.06 * exp(-0.35 * d * d);
+  return exp(-2.5 * d * d) + 0.025 * exp(-0.5 * d * d);
 }
 
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
   let k = profile(in);
-  return vec4<f32>(tonemap(in.colour.rgb * k), in.seen * k);
+  // Emitting particles add radiance; they do not punch a dark alpha-shaped hole in the footage.
+  return vec4<f32>(in.colour.rgb * k, 0.0);
 }
 
 // Into the export's fire layer, linear and premultiplied like the raymarch's, scaled by the sample weight.
 @fragment
 fn fsExport(in: Out) -> @location(0) vec4<f32> {
   let k = profile(in);
-  return vec4<f32>(in.colour.rgb * k, in.seen * k) * V.sampleWeight;
+  return vec4<f32>(in.colour.rgb * k, 0.0) * V.sampleWeight;
 }`;

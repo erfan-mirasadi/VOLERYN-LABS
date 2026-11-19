@@ -1,4 +1,6 @@
 import { DENSITY, FLOW_PERIOD } from './scene';
+export { BLACKBODY } from './blackbody';
+import { BLACKBODY, FIRE_RADIANCE } from './blackbody';
 
 export const PARAMS_STRUCT = /* wgsl */ `
 struct Params {
@@ -25,8 +27,13 @@ struct Params {
   ignite: f32,
   seed: f32,
   width: f32,
-  pad3: f32,
+  disturbance: f32,
   objects: array<vec4<f32>, 8>,
+  // Reference Kelvin at unit heat, smoke shading density, flame opacity, padding.
+  appearance: vec4<f32>,
+  // Moving-window velocity in current-grid cells/s. Velocity textures retain absolute world velocity.
+  transport: vec3<f32>,
+  transportPad: f32,
 }
 `;
 
@@ -75,15 +82,37 @@ fn noise3(p: vec3<f32>) -> f32 {
   let d = mix(hash3(i + vec3<f32>(0.0, 1.0, 1.0)), hash3(i + vec3<f32>(1.0, 1.0, 1.0)), u.x);
   return mix(mix(a, b, u.y), mix(c, d, u.y), u.z);
 }
+// The charge is a porous, seeded volume, not a hot sphere with noise painted on its surface.
+// Shape is shared by sourcing and blast expansion so their lobes move together.
+fn sourceShape(p: vec3<f32>) -> vec4<f32> {
+  let local = (p - P.emitter) / max(P.radius * vec3<f32>(P.width, 1.0, P.width), vec3<f32>(0.01));
+  let baseDistance = length(local);
+  if (P.mode != 2.0 || baseDistance > 1.6) { return vec4<f32>(baseDistance, 1.0, 1.0, 0.0); }
+  let offset = seedShift() * 0.13;
+  let broad = noise3(local * 2.1 + offset);
+  let fine = noise3(local * 5.3 + offset + vec3<f32>(7.1));
+  let warp = vec3<f32>(noise3(local * 2.7 + offset), noise3(local * 2.7 + offset + vec3<f32>(19.3)), noise3(local * 2.7 + offset + vec3<f32>(41.7))) - vec3<f32>(0.5);
+  let radius = 0.7 + 0.55 * broad;
+  let distance = length(local + 0.3 * warp) / radius;
+  // The rich pockets are cool and sooty; mixed pockets can ignite. Their coherent source masks
+  // become advected scalar fields, rather than fresh noise painted into each later frame.
+  let mixture = 0.65 * broad + 0.35 * fine;
+  let porosity = 0.04 + 2.2 * smoothstep(0.38, 0.67, mixture);
+  let richness = smoothstep(0.7, 1.5, porosity);
+  let ignition = smoothstep(0.38, 0.68, noise3(local * 3.7 + offset + vec3<f32>(4.3, 9.1, 2.8)));
+  return vec4<f32>(distance, porosity, ignition, richness);
+}
 ` + SOLIDS;
 
 // Velocity lives on the cell faces: texel c holds the flow through its lower x, y and z faces.
-// The side walls, the floor and solids block their faces; the top stays open. Needs the solid mask bound as solid.
+// The floor and solids block their faces. Side boundaries prescribe the ambient wind's normal
+// flow at BOTH sides; their pressure is Neumann, so projection changes the interior flow around obstacles
+// without cancelling that through-flow. The top stays open. Needs the solid mask bound as solid.
 const BLOCKED = /* wgsl */ `
 fn solidCell(c: vec3<i32>) -> bool { return textureLoad(solid, clampc(c), 0).x > 0.5; }
 fn blocked(c: vec3<i32>) -> vec3<bool> {
   let here = solidCell(c);
-  return vec3<bool>(c.x == 0 || here || solidCell(c - X), c.y == 0 || here || solidCell(c - Y), c.z == 0 || here || solidCell(c - Z));
+  return vec3<bool>(here || solidCell(c - X), c.y == 0 || here || solidCell(c - Y), here || solidCell(c - Z));
 }
 `;
 
@@ -91,6 +120,7 @@ fn blocked(c: vec3<i32>) -> vec3<bool> {
 export const TRACE = /* wgsl */ `
 fn faceOffset(axis: i32) -> vec3<f32> { return 0.5 * vec3<f32>(f32(axis == 0), f32(axis == 1), f32(axis == 2)); }
 fn velocityAt(p: vec3<f32>) -> vec3<f32> {
+  if (p.x < -0.5 || p.z < -0.5 || p.x > P.size.x - 0.5 || p.z > P.size.z - 0.5) { return P.wind; }
   return vec3<f32>(
     textureSampleLevel(vel, lin, coord(p + faceOffset(0)), 0.0).x,
     textureSampleLevel(vel, lin, coord(p + faceOffset(1)), 0.0).y,
@@ -98,12 +128,22 @@ fn velocityAt(p: vec3<f32>) -> vec3<f32> {
 }
 // Where the gas now at p was one step ago, by the midpoint rule; a negative dt asks where it will be.
 fn trace(p: vec3<f32>, dt: f32) -> vec3<f32> {
-  let mid = p - 0.5 * dt * velocityAt(p);
-  return p - dt * velocityAt(mid);
+  let mid = p - 0.5 * dt * (velocityAt(p) - P.transport);
+  return p - dt * (velocityAt(mid) - P.transport);
 }
 `;
 
 export const SHADERS = {
+  initializeVelocity: /* wgsl */ `
+@group(0) @binding(1) var dst: texture_storage_3d<rgba16float, write>;
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let c = vec3<i32>(id);
+  if (!inside(c)) { return; }
+  // A newly created explosion is immersed in already-moving ambient air. The following pressure
+  // projection still adds thermal motion and enforces the floor and any normal flow constraints.
+  textureStore(dst, c, vec4<f32>(P.wind, 0.0));
+}`,
   predictVelocity: /* wgsl */ `
 @group(0) @binding(1) var vel: texture_3d<f32>;
 @group(0) @binding(2) var src: texture_3d<f32>;
@@ -163,7 +203,11 @@ ${TRACE}
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
   if (!inside(c)) { return; }
-  textureStore(dst, c, textureSampleLevel(src, lin, coord(trace(vec3<f32>(c), P.dt)), 0.0));
+  let back = trace(vec3<f32>(c), P.dt);
+  let outside = any(back < vec3<f32>(-0.5)) || any(back > P.size - vec3<f32>(0.5));
+  // Incoming ambient air carries no soot, heat or fuel. Clamping an inflow to an edge cell
+  // otherwise keeps re-injecting smoke and stretches it into a sheet along the domain wall.
+  textureStore(dst, c, select(textureSampleLevel(src, lin, coord(back), 0.0), vec4<f32>(0.0), outside));
 }`,
   correct: /* wgsl */ `
 @group(0) @binding(1) var vel: texture_3d<f32>;
@@ -194,20 +238,33 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     hi = max(hi, s);
   }
   q = clamp(q, lo, hi);
+  if (any(back < vec3<f32>(-0.5)) || any(back > P.size - vec3<f32>(0.5))) { q = vec4<f32>(0.0); }
+  // Stable heat diffusion mixes the advected thermal field with its six neighbours. The coefficient
+  // scales with cells per world length squared; an exponential convex blend remains bounded on every grid.
+  let neighbourHeat = (textureLoad(hat, clampc(c + X), 0).y + textureLoad(hat, clampc(c - X), 0).y + textureLoad(hat, clampc(c + Y), 0).y + textureLoad(hat, clampc(c - Y), 0).y + textureLoad(hat, clampc(c + Z), 0).y + textureLoad(hat, clampc(c - Z), 0).y) / 6.0;
+  q.y = mix(q.y, neighbourHeat, 1.0 - exp(-3.0 * cellScale() * cellScale() * P.dt));
   // Fuel burns where the gas is hot enough to ignite, into heat and soot; the heat then fades.
-  let rate = P.burn * smoothstep(P.ignite, P.ignite + 0.25, q.y);
-  let burned = q.z * (1.0 - exp(-rate * P.dt));
+  // Reduced mixing-limited combustion: rich pockets cannot consume their whole charge at once.
+  // The neighbouring fuel contrast is an entrainment proxy, not a separately solved oxygen field.
+  let fuelGradient = 0.5 * vec3<f32>(textureLoad(old, clampc(c + X), 0).z - textureLoad(old, clampc(c - X), 0).z, textureLoad(old, clampc(c + Y), 0).z - textureLoad(old, clampc(c - Y), 0).z, textureLoad(old, clampc(c + Z), 0).z - textureLoad(old, clampc(c - Z), 0).z) / cellScale();
+  let mixing = clamp(0.18 + 0.82 / (1.0 + 0.7 * q.z) + 0.25 * length(fuelGradient), 0.18, 1.0);
+  let rate = P.burn * mixing * smoothstep(P.ignite, P.ignite + 0.25, q.y);
+  let kineticBurn = q.z * (1.0 - exp(-rate * P.dt));
+  // An explosion's concentrated charge is mixing-limited: entrained air, not the amount of fuel
+  // in a cell, bounds instantaneous heat release. This prevents all dense pockets flashing white together.
+  // Concentrations and rates are grid independent; the exposed burn-rate multiplier also scales this limit.
+  let supply = 0.15 * P.burn * mixing * P.dt;
+  let burned = select(kineticBurn, min(kineticBurn, supply), P.mode == 2.0);
   q.z -= burned;
   // The burn rate rides in w so the pressure solve can let burning gas expand.
   q.w = burned / P.dt;
-  // Radiation is what cools a flame, and it goes as the fourth power of the temperature: fierce while the soot
-  // glows, next to nothing once it has gone dark. So below the glow the gas keeps most of the heat it has left,
-  // and that heat is what carries the smoke column up.
+  // A reduced cooling curve loses heat quickly while incandescent and slowly after it goes dark.
+  // Retaining this afterheat carries the smoke upward; this is not a resolved radiative energy solve.
   let hot = q.y + burned * P.heat;
   q.y = hot * exp(-P.cooling * mix(AFTERHEAT_COOLING, 1.0, smoothstep(0.05, 0.2, hot)) * P.dt);
-  // Soot forms wherever fuel burns and burns out again while the gas around it stays hot. Below about 1300 K that
-  // oxidation stalls (Kent and Wagner, 1984), so the soot still left when the flame cools, at its tips and in the
-  // eddies the air quenches along its edge, is what leaves as black smoke. On the blackbody scale 1300 K is 0.5.
+  // Soot forms wherever fuel burns and oxidises while the gas around it stays hot. Oxidation slows
+  // as the gas cools: soot left at the tips and in air-quenched eddies becomes smoke.
+  // These thresholds are reduced-model values, independent of the artistic Kelvin calibration.
   // Smoke that has no flame under it is not soot on its way through one, so it keeps what it has.
   let burnout = select(0.0, SOOT_BURNOUT * smoothstep(0.5, 0.8, q.y), P.burn > 0.0);
   q.x = (q.x + burned * P.smokeYield) * exp(-(burnout + P.dissipation) * P.dt);
@@ -228,23 +285,32 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       q.y += amount * 0.25;
     }
   } else {
-    let d = length((p - P.emitter) / (P.radius * vec3<f32>(P.width, 1.0, P.width)));
-    if (d < 1.0) {
+    let shape = sourceShape(p);
+    let d = shape.x;
+    if (d < 1.0 && P.emit > 0.0) {
       var amount = (1.0 - d * d) * (0.35 + 1.3 * flicker) * P.emit * P.dt;
-      // An explosion needs a lumpy charge; an even ball of fuel burns into a perfect sphere.
-      if (P.mode == 2.0) { amount *= 2.0 * flicker * flicker * (0.3 + 1.4 * noise3(p * 0.15 / k + vec3<f32>(0.0, 0.1 * P.time, 0.0))); }
+      if (P.mode == 2.0) { amount *= shape.y; }
       if (P.mode == 1.0) {
         q.x += amount * 0.8;
         q.y += amount * 0.5;
       } else {
         q.z += amount;
-        // An explosion's charge goes in at full heat so it flashes from its first frame.
-        q.y += amount * select(0.25, P.heat, P.mode == 2.0);
+        if (P.mode == 2.0) {
+          // Ignite pockets of the charge; combustion supplies the rest of the heat over time.
+          // Heating every fuel voxel at full strength made an opaque uniform yellow ball immediately.
+          let ignition = (0.12 + 0.7 * shape.z * (1.0 - 0.7 * shape.w)) * smoothstep(0.0, 0.3, 1.0 - d);
+          q.y = max(q.y, ignition);
+          // A practical fuel charge includes cool particulate products. Keeping these concentrated in
+          // rich pockets gives the advancing luminous sheets real dark volume to roll around and light.
+          q.x += amount * P.smokeYield * 0.1 * shape.w;
+        } else {
+          q.y += amount * 0.25;
+        }
       }
     }
   }
-  // A soft sponge under the lid hides the open top boundary.
-  q *= 1.0 - 0.15 * smoothstep(0.8, 1.0, p.y / P.size.y);
+  // A time-based sponge under the lid hides the approximate open top consistently across substeps.
+  q *= exp(-9.75 * P.dt * smoothstep(0.8, 1.0, p.y / P.size.y));
   textureStore(dst, c, max(q, vec4<f32>(0.0)));
 }`,
   advectFlow: /* wgsl */ `
@@ -321,16 +387,20 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (len > 1e-4) {
     v += P.dt * P.vorticity * cross(grad / len, textureLoad(curl, c, 0).xyz);
   }
-  v += P.dt * P.wind * (p.y / P.size.y);
   // Rising curl noise stirs the hot gas and the reaction sheet; being divergence-free it survives the projection.
   // A second octave, a third the size and rising faster, lives where the gas is hot and fuel is burning: the small
   // movement that keeps a flame's tongues alive without shaking the whole plume.
-  let rise = vec3<f32>(0.0, -12.0 * k * P.time, 0.0) + seedShift();
+  let rise = vec3<f32>(0.0, -12.0 * k * P.time, 0.0) + k * seedShift();
   let stirring = textureSampleLevel(stir, rep, (p + rise) / (24.0 * k), 0.0).xyz;
-  let rise2 = vec3<f32>(0.0, -27.0 * k * P.time, 0.0) + 2.0 * seedShift();
+  let rise2 = vec3<f32>(0.0, -27.0 * k * P.time, 0.0) + 2.0 * k * seedShift();
   let fine = textureSampleLevel(stir, rep, (p + rise2) / (9.0 * k), 0.0).xyz;
-  v += P.dt * P.turbulence * (stirring * clamp(s.y + 0.3 * s.x + 0.05 * s.w, 0.0, 1.5) + 0.5 * fine * clamp(0.6 * s.y + 0.12 * s.w, 0.0, 1.2));
-  let d = length((p - P.emitter) / (P.radius * vec3<f32>(P.width, 1.0, P.width)));
+  // Coarse churning and fine breakup have independent controls. Disturbance lives near the thermal
+  // front and weak smoke cap, so adding edge detail need not shake the entire fireball.
+  let heatGradient = 0.5 * vec3<f32>(textureLoad(sca, clampc(c + X), 0).y - textureLoad(sca, clampc(c - X), 0).y, textureLoad(sca, clampc(c + Y), 0).y - textureLoad(sca, clampc(c - Y), 0).y, textureLoad(sca, clampc(c + Z), 0).y - textureLoad(sca, clampc(c - Z), 0).y) / k;
+  let front = clamp(2.0 * length(heatGradient) + 0.1 * s.x, 0.0, 1.0);
+  v += P.dt * P.turbulence * stirring * clamp(s.y + 0.3 * s.x + 0.05 * s.w, 0.0, 1.5);
+  v += P.dt * (18.0 * k * P.disturbance) * fine * front;
+  let d = sourceShape(p).x;
   if (d < 1.0) {
     v.y += P.dt * P.emit * 0.8 * k * (1.0 - d);
   }
@@ -351,7 +421,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let here = textureLoad(force, c, 0).xyz;
   let below = vec3<f32>(textureLoad(force, clampc(c - X), 0).x, textureLoad(force, clampc(c - Y), 0).y, textureLoad(force, clampc(c - Z), 0).z);
   var v = textureLoad(vel, c, 0).xyz + 0.5 * (here + below);
-  v *= exp(-P.damping * P.dt) * (1.0 - 0.06 * smoothstep(0.8, 1.0, p.y / P.size.y));
+  // Drag is relative to the ambient wind, rather than to a stationary box. The prescribed side
+  // flux and Neumann pressure boundaries keep a constant wind from being projected away.
+  v = P.wind + (v - P.wind) * exp(-P.damping * P.dt);
+  v.y *= exp(-3.7 * P.dt * smoothstep(0.8, 1.0, p.y / P.size.y));
+  if (c.x == 0) { v.x = P.wind.x; }
+  if (c.z == 0) { v.z = P.wind.z; }
   textureStore(dst, c, vec4<f32>(select(v, vec3<f32>(0.0), blocked(c)), 0.0));
 }`,
   divergence: /* wgsl */ `
@@ -370,17 +445,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   }
   let n = dims();
   let v = textureLoad(vel, c, 0).xyz;
-  // The far faces: the side walls block, the open top repeats the face below.
-  let right = select(textureLoad(vel, clampc(c + X), 0).x, 0.0, c.x == n.x - 1);
+  // The far side faces are not stored: they carry the same ambient normal flux as the near
+  // faces. The open top repeats the face below and is the outlet for thermal expansion.
+  let right = select(textureLoad(vel, clampc(c + X), 0).x, P.wind.x, c.x == n.x - 1);
   let above = select(textureLoad(vel, clampc(c + Y), 0).y, v.y, c.y == n.y - 1);
-  let front = select(textureLoad(vel, clampc(c + Z), 0).z, 0.0, c.z == n.z - 1);
+  let front = select(textureLoad(vel, clampc(c + Z), 0).z, P.wind.z, c.z == n.z - 1);
   let div = (right - v.x) + (above - v.y) + (front - v.z);
   // Burning gas expands, and a blast pushes out from the charge: the solve targets this much divergence instead of
   // none, so the push goes through the projection instead of being stripped by it. The blast is uneven, so the
   // fireball breaks into lobes instead of staying a ball.
-  let d = length((vec3<f32>(c) - P.emitter) / (P.radius * vec3<f32>(P.width, 1.0, P.width)));
-  let lumps = 0.2 + 1.6 * noise3(vec3<f32>(c) * 0.12 / cellScale() + vec3<f32>(0.0, 0.0, 0.1 * P.time));
-  let expansion = P.expansion * textureLoad(sca, c, 0).w + P.blast * max(1.0 - d * d, 0.0) * lumps;
+  let shape = sourceShape(vec3<f32>(c));
+  let expansion = P.expansion * textureLoad(sca, c, 0).w + P.blast * max(1.0 - shape.x * shape.x, 0.0) * shape.y;
   textureStore(dst, c, vec4<f32>(div - expansion, 0.0, 0.0, 0.0));
 }`,
   project: /* wgsl */ `
@@ -395,7 +470,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = vec3<i32>(id);
   if (!inside(c)) { return; }
   let q = at(c);
-  let v = textureLoad(vel, c, 0).xyz - vec3<f32>(q - at(c - X), q - at(c - Y), q - at(c - Z));
+  var v = textureLoad(vel, c, 0).xyz - vec3<f32>(q - at(c - X), q - at(c - Y), q - at(c - Z));
+  if (c.x == 0) { v.x = P.wind.x; }
+  if (c.z == 0) { v.z = P.wind.z; }
   textureStore(dst, c, vec4<f32>(select(v, vec3<f32>(0.0), blocked(c)), 0.0));
 }`,
   shadow: /* wgsl */ `
@@ -424,30 +501,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (up.y > 1.0) { break; }
     depthUp += textureSampleLevel(sca, lin, up, 0.0).x;
   }
-  let scale = 0.03 * ${DENSITY.toFixed(1)};
+  let scale = 0.03 * ${DENSITY.toFixed(1)} * P.appearance.y;
   textureStore(dst, vec3<i32>(id), vec4<f32>(exp(-depth * scale), exp(-depthUp * scale), 0.0, 1.0));
 }`,
 };
 
-// Flame colour from temperature: an approximate blackbody curve between dull red and yellow, brighter when hotter.
-// flame() is how much of the hot gas is glowing soot: it emits where it absorbs.
-export const BLACKBODY = /* wgsl */ `
-fn blackbody(t: f32) -> vec3<f32> {
-  let k = clamp(10.0 + 6.0 * t, 10.0, 26.0);
-  let g = clamp((99.4708 * log(k) - 161.1196) / 255.0, 0.0, 1.0);
-  let b = select(clamp((138.5177 * log(max(k - 10.0, 1.0)) - 305.0448) / 255.0, 0.0, 1.0), 0.0, k <= 19.0);
-  return pow(vec3<f32>(1.0, g, b), vec3<f32>(2.2)) * pow(k / 15.0, 2.5);
-}
-fn flame(t: f32) -> f32 { return smoothstep(0.15, 0.6, t); }
-`;
-
 // The flame's light, averaged over each block of fine cells into the coarse light volume; its alpha holds the block's
 // occupancy (the most smoke or heat in it) so the raymarch can skip empty space. The block's mean smoke goes to a
 // second volume, which the blur reads to let the light through thin smoke and hold it back in thick.
-export const EMISSION = (scale: number) => BLACKBODY + /* wgsl */ `
-@group(0) @binding(0) var sca: texture_3d<f32>;
-@group(0) @binding(1) var dst: texture_storage_3d<rgba16float, write>;
-@group(0) @binding(2) var thick: texture_storage_3d<r32float, write>;
+export const EMISSION = (scale: number) => PARAMS_STRUCT + BLACKBODY + /* wgsl */ `
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var sca: texture_3d<f32>;
+@group(0) @binding(2) var dst: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(3) var thick: texture_storage_3d<r32float, write>;
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (any(id >= textureDimensions(dst))) { return; }
@@ -459,7 +525,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var y = 0; y < ${scale}; y++) {
       for (var x = 0; x < ${scale}; x++) {
         let s = textureLoad(sca, base + vec3<i32>(x, y, z), 0);
-        sum += blackbody(s.y) * flame(s.y);
+        sum += blackbodyAt(s.y, P.appearance.x) * flame(s.y) * min(s.x * 0.35 + s.w * 0.015, 2.0) * P.appearance.z * ${FIRE_RADIANCE.toFixed(3)};
         smoke += s.x;
         occupancy = max(occupancy, max(s.x, s.y));
       }
@@ -467,7 +533,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   }
   let cells = ${(scale * scale * scale).toFixed(1)};
   textureStore(dst, vec3<i32>(id), vec4<f32>(sum / cells, occupancy));
-  textureStore(thick, vec3<i32>(id), vec4<f32>(smoke / cells, 0.0, 0.0, 0.0));
+  textureStore(thick, vec3<i32>(id), vec4<f32>(smoke * P.appearance.y / cells, 0.0, 0.0, 0.0));
 }`;
 
 // Spreads the light volume one cell outwards; run a few times it stands in for light scattering through the smoke.

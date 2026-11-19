@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import type { DepthEstimator } from '@/engine/depth';
 import type { Engine, Framing, Occlusion } from '@/engine/engine';
 import { type Plate, releasePlate } from '@/engine/plate';
-import { QUALITIES, type QualityId, type Tweaks } from '@/engine/scene';
+import { defaultTweaks, QUALITIES, type QualityId, type Tweaks } from '@/engine/scene';
 import { presetById, PRESETS } from '@/presets/presets';
 
 export type GpuStatus = 'loading' | 'ready' | 'unsupported' | 'error';
@@ -28,6 +28,7 @@ type StudioState = {
   setQuality: (quality: QualityId) => void;
   setPreset: (presetId: string) => void;
   setTweak: (key: keyof Tweaks, value: number) => void;
+  resetTweaks: () => void;
   addCube: () => void;
   setBackdrop: (backdrop: Backdrop) => void;
   setPlate: (plate: Plate | null) => void;
@@ -45,7 +46,7 @@ export const useStudioStore = create<StudioState>()((set, get) => ({
   engine: null,
   status: 'loading',
   presetId: PRESETS[0].id,
-  tweaks: { heat: 1, vorticity: PRESETS[0].vorticity, wind: 0, windYaw: 0, seed: 0, blue: PRESETS[0].blue, sparks: PRESETS[0].sparks, smoke: 1, width: 1 },
+  tweaks: defaultTweaks(PRESETS[0]),
   backdrop: 'checker',
   plate: null,
   framing: CENTRED,
@@ -56,6 +57,7 @@ export const useStudioStore = create<StudioState>()((set, get) => ({
   exporting: false,
   sound: false,
   setEngine: (engine, status) => {
+    engine?.setTweaks(get().tweaks);
     engine?.setQuality(QUALITIES[get().quality]);
     engine?.setFraming(get().framing);
     engine?.setOcclusion(get().occlusion);
@@ -70,11 +72,18 @@ export const useStudioStore = create<StudioState>()((set, get) => ({
   setPreset: (presetId) => {
     const preset = presetById(presetId);
     get().engine?.setPreset(preset);
-    set({ presetId, tweaks: { ...get().tweaks, heat: 1, vorticity: preset.vorticity, wind: 0, blue: preset.blue, sparks: preset.sparks, smoke: 1, width: 1 } });
+    set({ presetId, tweaks: { ...defaultTweaks(preset), seed: get().tweaks.seed, windYaw: get().tweaks.windYaw } });
   },
   setTweak: (key, value) => {
     get().engine?.setTweaks({ [key]: value });
     set((state) => ({ tweaks: { ...state.tweaks, [key]: value } }));
+  },
+  resetTweaks: () => {
+    const { engine, presetId, tweaks: current } = get();
+    const tweaks = { ...defaultTweaks(presetById(presetId)), seed: current.seed, windYaw: current.windYaw };
+    engine?.setTweaks(tweaks);
+    engine?.restart();
+    set({ tweaks });
   },
   addCube: () => {
     const half = 3 + Math.random() * 3;

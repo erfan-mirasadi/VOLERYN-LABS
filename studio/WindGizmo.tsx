@@ -18,7 +18,7 @@ export default function WindGizmo() {
     let frame = 0;
     const update = () => {
       const { wind, windYaw } = useStudioStore.getState().tweaks;
-      const yaw = (windYaw * Math.PI) / 180;
+      const yaw = ((windYaw + (wind < 0 ? 180 : 0)) * Math.PI) / 180;
       const from = engine.project(CENTRE);
       const to = engine.project([CENTRE[0] + LENGTH * Math.cos(yaw), CENTRE[1], CENTRE[2] + LENGTH * Math.sin(yaw)]);
       if (from && to && line.current && head.current) {
@@ -42,7 +42,9 @@ export default function WindGizmo() {
     const floor = engine.floorPoint(event.clientX - rect.left, event.clientY - rect.top);
     if (!floor) return;
     const yaw = (Math.atan2(floor[2] - CENTRE[2], floor[0] - CENTRE[0]) * 180) / Math.PI;
-    setTweak('windYaw', Math.round((yaw + 360) % 360));
+    // The handle represents the actual flow direction, including a negative speed's reversal.
+    const reversed = useStudioStore.getState().tweaks.wind < 0 ? 180 : 0;
+    setTweak('windYaw', Math.round((yaw - reversed + 720) % 360) % 360);
   };
 
   return (

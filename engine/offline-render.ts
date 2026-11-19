@@ -1,5 +1,5 @@
 import { type Camera, cameraBasis, type Renderer, unit, type Vec3 } from './render';
-import { BOX_MAX, BOX_MIN, type Preset, type SimulationGrid } from './scene';
+import { BOX_MAX, BOX_MIN, type Preset, type SimulationGrid, type Tweaks } from './scene';
 import { LOOP_SOURCE, type Simulation } from './simulation';
 
 const MAX_OVERLAP = 32;
@@ -55,6 +55,7 @@ export type OfflineContext = {
   renderer: Renderer;
   preset: Preset;
   blue: number;
+  tweaks: Tweaks;
   // Runs one simulation step and returns the simulation time after it.
   step: (dt: number) => number;
   // Puts the footage plate, and its depth, on the frame for a clip time, when the job uses either.
@@ -88,17 +89,21 @@ export const loopOverlap = (frames: number, grid: readonly number[]) =>
 
 // A narrow lens on the user's orbit direction, pulled back until the domain's inscribed cylinder fits a square frame
 // with a margin: the box corners would hold an oblique view further out for nothing.
-export function fitCamera(eye: Vec3, fovDegrees = 20, margin = 0.92): Camera {
-  const centre = BOX_MIN.map((lo, k) => (lo + BOX_MAX[k]) / 2) as Vec3;
-  const { forward, right, up } = cameraBasis({ eye, target: centre, tanHalfFov: 0 });
+export function fitCamera(eye: Vec3, fovDegrees = 20, margin = 0.92, travel: Vec3 = [0, 0, 0]): Camera {
+  const originalCentre = BOX_MIN.map((lo, k) => (lo + BOX_MAX[k]) / 2) as Vec3;
+  const centre = originalCentre.map((c, k) => c + travel[k] / 2) as Vec3;
+  const { forward, right, up } = cameraBasis({ eye, target: originalCentre, tanHalfFov: 0 });
   const t = Math.tan((fovDegrees * Math.PI) / 360);
   const radius = (BOX_MAX[0] - BOX_MIN[0]) / 2;
   let distance = 0;
   for (let k = 0; k < RIM_SAMPLES; k++) {
     const angle = (2 * Math.PI * k) / RIM_SAMPLES;
     for (const y of [BOX_MIN[1], BOX_MAX[1]]) {
-      const rel: Vec3 = [radius * Math.cos(angle), y - centre[1], radius * Math.sin(angle)];
-      distance = Math.max(distance, Math.max(Math.abs(dot(rel, right)), Math.abs(dot(rel, up))) / (margin * t) - dot(rel, forward));
+      // Bound both ends of the translating window, before the content probe tightens the lens.
+      for (const along of [-0.5, 0.5]) {
+        const rel: Vec3 = [radius * Math.cos(angle) + along * travel[0], y - originalCentre[1] + along * travel[1], radius * Math.sin(angle) + along * travel[2]];
+        distance = Math.max(distance, Math.max(Math.abs(dot(rel, right)), Math.abs(dot(rel, up))) / (margin * t) - dot(rel, forward));
+      }
     }
   }
   return { eye: centre.map((c, i) => c - forward[i] * distance) as Vec3, target: centre, tanHalfFov: t };
@@ -116,7 +121,9 @@ export async function fitToContent(render: (job: OfflineJob, onFrame: (frame: Re
     const display = planes.display!;
     for (let y = 0; y < n; y++) {
       for (let x = 0; x < n; x++) {
-        if (display[y * stride + 4 * x + 3] < PROBE_ALPHA) continue;
+        const at = y * stride + 4 * x;
+        // Additive embers have zero extinction alpha, but still belong inside the fitted frame.
+        if (Math.max(display[at], display[at + 1], display[at + 2], display[at + 3]) < PROBE_ALPHA) continue;
         x0 = Math.min(x0, x);
         x1 = Math.max(x1, x);
         y0 = Math.min(y0, y);
@@ -207,6 +214,8 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
           camera: job.camera,
           preset: ctx.preset,
           blue: ctx.blue,
+          tweaks: ctx.tweaks,
+          offset: simulation.offset,
           time,
           source,
           jitter: filterOffset(s),

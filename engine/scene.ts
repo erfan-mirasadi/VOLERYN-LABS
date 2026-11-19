@@ -100,7 +100,26 @@ export type Preset = {
 
 // Live tweaks the studio layers over a preset without changing the preset itself.
 // Wind blows along windYaw degrees from +x towards +z; smoke scales the preset's yield; width stretches the emitter sideways.
-export type Tweaks = { heat: number; vorticity: number; wind: number; windYaw: number; seed: number; blue: number; sparks: number; smoke: number; width: number };
+export type Tweaks = {
+  heat: number; fuel: number; burnRate: number; cooling: number; buoyancy: number;
+  vorticity: number; turbulence: number; disturbance: number; expansion: number;
+  wind: number; windYaw: number; windGust: number; seed: number;
+  blue: number; sparks: number; sparkSize: number; sparkLife: number; smoke: number; width: number;
+  // Appearance is independent of combustion: temperature is reference Kelvin; exposure is in stops.
+  temperature: number; exposure: number; fireOpacity: number; smokeDensity: number; detail: number; ambient: number;
+  lightYaw: number; lightElevation: number; keyLight: number;
+};
+
+export function defaultTweaks(preset: Preset): Tweaks {
+  return {
+    heat: 1, fuel: 1, burnRate: 1, cooling: 1, buoyancy: 1,
+    vorticity: preset.vorticity, turbulence: 1, disturbance: 1, expansion: 1,
+    wind: 0, windYaw: 0, windGust: 0.2, seed: 0,
+    blue: preset.blue, sparks: preset.sparks, sparkSize: 1, sparkLife: 1, smoke: 1, width: 1,
+    temperature: 1900, exposure: 0, fireOpacity: 1, smokeDensity: 1, detail: 1, ambient: 1,
+    lightYaw: Math.atan2(LIGHT[2], LIGHT[0]) * 180 / Math.PI, lightElevation: Math.asin(LIGHT[1]) * 180 / Math.PI, keyLight: 1,
+  };
+}
 
 export const MODE_INDEX: Record<EmitterMode, number> = { fire: 0, smoke: 1, explosion: 2, objects: 3 };
 

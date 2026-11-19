@@ -30,6 +30,7 @@ const ROWS: Row[] = [
   { key: 'cell', label: 'Cell', options: [128, 256, 512].map((px) => [px, `${px} px`]), modes: ['flipbook'] },
   { key: 'motion', label: 'Motion vectors', options: [['off', 'Off'], ['unreal', 'Unreal'], ['unity', 'Unity']], modes: ['flipbook'] },
   { key: 'shutter', label: 'Motion blur', options: [[0, 'Off'], [0.5, '180° shutter']], modes: ALL },
+  { key: 'fidelity', label: 'Simulation', options: [['draft', 'Draft · faster iteration'], ['final', 'Final · highest detail']], modes: ALL },
   { key: 'samples', label: 'Samples', options: [4, 16, 32, 64].map((n) => [n, `${n} per pixel`]), modes: ALL },
 ];
 
@@ -140,7 +141,7 @@ export default function ExportPanel() {
       )}
       {message && <p className="text-muted">{message}</p>}
       <p className="text-xs text-muted">
-        Every render simulates on a 256 × 384 × 256 grid, sixty-four times the viewport’s cells, so a 4K clip takes minutes. Chrome and Edge write into a folder you pick; other browsers download a zip.
+        Draft renders use a finer simulation than the standard preview; Final adds eight times the cells again. Use Draft to match the shot, then Final for delivery. A 4K Final clip can take several minutes. Chrome and Edge save into a folder you pick; other browsers download a zip.
       </p>
     </fieldset>
   );

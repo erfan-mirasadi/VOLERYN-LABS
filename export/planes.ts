@@ -56,7 +56,9 @@ export function toRgba({ width, height, stride, planes }: RenderedFrame, bits: 8
   return out;
 }
 
-// The light groups as they came back, the beauty as their sum, and depth and motion divided out of the coverage.
+// The light groups retain their half-float samples. Sum beauty into full floats: several finite half-float
+// groups can add beyond 65504, and narrowing that sum to half would write infinity into an otherwise valid EXR.
+// Depth and motion are divided out of the coverage.
 export function toExrChannels({ width, height, stride, planes }: RenderedFrame): ExrChannel[] {
   const { fire, firelight, smoke, data } = planes as Record<string, Uint16Array>;
   const half = halves();
@@ -64,7 +66,7 @@ export function toExrChannels({ width, height, stride, planes }: RenderedFrame):
   const groups = ['fire', 'firelight', 'smoke'].map((name) => ({ name, source: planes[name as 'fire']!, channels: [0, 1, 2].map(() => new Uint16Array(n)) }));
   const alpha = new Uint16Array(n);
   const temperature = new Uint16Array(n);
-  const beauty = [0, 1, 2].map(() => new Float16Array(n));
+  const beauty = [0, 1, 2].map(() => new Float32Array(n));
   const u = new Float16Array(n);
   const v = new Float16Array(n);
   const z = new Float32Array(n);
@@ -85,7 +87,7 @@ export function toExrChannels({ width, height, stride, planes }: RenderedFrame):
   const bits = (floats: Float16Array) => new Uint16Array(floats.buffer);
   return [
     ...groups.flatMap(({ name, channels }) => channels.map((data, k) => ({ name: `${name}.${'RGB'[k]}`, data }))),
-    ...beauty.map((data, k) => ({ name: 'RGB'[k], data: bits(data) })),
+    ...beauty.map((data, k) => ({ name: 'RGB'[k], data })),
     { name: 'A', data: alpha },
     { name: 'temperature.Y', data: temperature },
     { name: 'forward.u', data: bits(u) },

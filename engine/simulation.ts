@@ -1,11 +1,11 @@
 import { bindResources } from './gpu';
 import { createNoiseTextures, type NoiseTextures } from './noise-textures';
 import { createPressureSolver } from './pressure';
-import { type Box, DENSITY, GRID, LIGHT, LIGHT_PATH, lightBlurDispatches, MAX_BOXES, MODE_INDEX, type Preset, type Quality, type Tweaks } from './scene';
+import { type Box, DENSITY, GRID, LIGHT_PATH, lightBlurDispatches, MAX_BOXES, MODE_INDEX, type Preset, type Quality, type Tweaks } from './scene';
 import { CLEAR, EMISSION, HEADER, LIGHT_BLUR, MIX, SHADERS } from './simulation-shaders';
 import { createSparkSimulation } from './sparks';
 
-const PARAM_FLOATS = 64;
+const PARAM_FLOATS = 80;
 // Index of the loop blend among the scalar and flow volumes; the solver never reads it, only lighting and rendering.
 export const LOOP_SOURCE = 2;
 
@@ -94,6 +94,7 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
   const bind = (pipeline: GPUComputePipeline, resources: (GPUBuffer | GPUTexture | GPUSampler)[]) => bindResources(device, pipeline, resources);
   // The step's bind groups, one set per params slot.
   const groups = paramSlots.map((params) => ({
+    initializeVelocity: bind(pipelines.initializeVelocity, [params, velocity]),
     predictVelocity: bind(pipelines.predictVelocity, [params, velocity, velocity, scratch, sampler]),
     correctVelocity: bind(pipelines.correctVelocity, [params, velocity, velocity, scratch, advected, sampler]),
     curl: bind(pipelines.curl, [params, advected, curl]),
@@ -108,7 +109,7 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
   const residual = both((j) => bind(pipelines.divergence, [paramSlots[0], velocity, divergence, scalars[j], pressure.solid]));
   const lighting = {
     shadow: states.map((j) => bind(pipelines.shadow, [paramSlots[0], scalars[j], sampler, shadow])),
-    emission: states.map((j) => bind(emission, [scalars[j], light[0], thickness])),
+    emission: states.map((j) => bind(emission, [paramSlots[0], scalars[j], light[0], thickness])),
     blur: lightBlur.map((pipeline) => both((i) => bind(pipeline, [light[i], light[1 - i], thickness]))),
   };
   const clearGroups = [
@@ -128,6 +129,11 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
 
   // Which scalar texture holds the latest state; the pair ping-pongs every step.
   let sc = 0;
+  // World displacement of the computational box. Explosions follow ambient horizontal transport,
+  // retaining their local detail instead of being sliced away at a stationary side boundary.
+  const offset: [number, number, number] = [0, 0, 0];
+  let needsInitialVelocity = true;
+  let movingStep = false;
   const paramData = new Float32Array(PARAM_FLOATS);
 
   // Positions, sizes, speeds and accelerations given in base cells become this grid's cells; rates per second,
@@ -137,20 +143,33 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
       const box = boxes[i];
       return box ? [box.x * k, box.y * k, box.z * k, box.yaw, box.hx * k, box.hy * k, box.hz * k, 1] : [0, 0, 0, 0, 0, 0, 0, 0];
     }).flat();
-    const wind = tweaks.wind * k;
+    // A spatially uniform, slowly varying far-field velocity stays divergence-free; the pressure solve
+    // deflects it around solids. Gust is amplitude, not a new random impulse on every frame.
+    const gust = 0.52 * Math.sin(time * 1.17 + tweaks.seed * 0.71) + 0.3 * Math.sin(time * 2.63 + tweaks.seed * 1.37) + 0.18 * Math.sin(time * 0.41 + 1.4);
+    const wind = tweaks.wind * k * (1 + tweaks.windGust * gust);
+    const windVector: [number, number, number] = [wind * Math.cos((tweaks.windYaw * Math.PI) / 180), 0, wind * Math.sin((tweaks.windYaw * Math.PI) / 180)];
+    movingStep = preset.mode === 'explosion';
+    const transport: [number, number, number] = movingStep ? windVector : [0, 0, 0];
+    for (let axis = 0; axis < 3; axis++) offset[axis] += transport[axis] * dt / grid[0];
+    const lightYaw = tweaks.lightYaw * Math.PI / 180;
+    const lightElevation = tweaks.lightElevation * Math.PI / 180;
+    const lightDirection = [Math.cos(lightYaw) * Math.cos(lightElevation), Math.sin(lightElevation), Math.sin(lightYaw) * Math.cos(lightElevation)];
     paramData.set([
       ...grid, dt,
-      time, preset.buoyancy * tweaks.heat * k, preset.cooling, tweaks.vorticity * k,
-      wind * Math.cos((tweaks.windYaw * Math.PI) / 180), 0, wind * Math.sin((tweaks.windYaw * Math.PI) / 180), preset.burn,
-      ...preset.emitter.map((c) => c * k), preset.radius * k,
-      emitting ? preset.emit : 0, preset.smokeYield * tweaks.smoke, preset.heat * tweaks.heat, preset.dissipation,
-      ...LIGHT, MODE_INDEX[preset.mode],
-      preset.turbulence * k, preset.damping, preset.expansion, blast,
-      preset.ignite, tweaks.seed, tweaks.width, 0,
+      time, preset.buoyancy * tweaks.buoyancy * k, preset.cooling * tweaks.cooling, tweaks.vorticity * k,
+      ...windVector, preset.burn * tweaks.burnRate,
+      // The charge and its brief blast stay anchored in world space as the box follows the plume.
+      ...preset.emitter.map((c, axis) => c * k - offset[axis] * grid[0]), preset.radius * k,
+      emitting ? preset.emit * tweaks.fuel : 0, preset.smokeYield * tweaks.smoke, preset.heat * tweaks.heat, preset.dissipation,
+      ...lightDirection, MODE_INDEX[preset.mode],
+      preset.turbulence * tweaks.turbulence * k, preset.damping, preset.expansion * tweaks.expansion, blast * tweaks.expansion,
+      preset.ignite, tweaks.seed, tweaks.width, tweaks.disturbance,
       ...boxData,
+      tweaks.temperature, tweaks.smokeDensity, tweaks.fireOpacity, 0,
+      ...transport, 0,
     ]);
     device.queue.writeBuffer(paramSlots[slot], 0, paramData);
-    sparks.writeParams(slot, tweaks.sparks);
+    sparks.writeParams(slot, tweaks.sparks, tweaks.sparkSize, tweaks.sparkLife);
   }
 
   // Velocity first: advect, add forces, project; then the scalars ride the divergence-free field. An export passes
@@ -158,6 +177,10 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
   // command buffers instead of one that could trip a GPU watchdog.
   function step(pass: GPUComputePassEncoder, slot: number, next?: () => GPUComputePassEncoder) {
     const g = groups[slot];
+    if (needsInitialVelocity) {
+      if (movingStep) run(pass, pipelines.initializeVelocity, g.initializeVelocity);
+      needsInitialVelocity = false;
+    }
     pressure.updateSolids(pass);
     run(pass, pipelines.predictVelocity, g.predictVelocity);
     run(pass, pipelines.correctVelocity, g.correctVelocity);
@@ -246,6 +269,8 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
   }
 
   function clear() {
+    offset.fill(0);
+    needsInitialVelocity = true;
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     for (const [pipeline, group] of clearGroups) run(pass, pipeline, group);
@@ -265,5 +290,5 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
   }
 
   const volumes: Volumes = { scalars, flows, velocity, shadow, light: light[0], params: paramSlots[0], sampler, noise, sparks: sparks.buffer };
-  return { grid, volumes, writeParams, step, updateLighting, keepFrame, blendLoop, releaseKept, readResidual, clear, dispose, get scalarIndex() { return sc; } };
+  return { grid, volumes, writeParams, step, updateLighting, keepFrame, blendLoop, releaseKept, readResidual, clear, dispose, get scalarIndex() { return sc; }, get offset(): [number, number, number] { return [...offset]; } };
 }

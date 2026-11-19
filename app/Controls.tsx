@@ -1,9 +1,10 @@
+import { defaultTweaks } from '@/engine/scene';
 import { PRESETS } from '@/presets/presets';
 import { SLIDERS } from '@/studio/controls';
 
 const fire = PRESETS[0];
 // Where each slider starts for the Fire preset, as the studio sets it.
-const START = { heat: 1, vorticity: fire.vorticity, wind: 0, seed: 0, blue: fire.blue, sparks: fire.sparks, smoke: 1, width: 1 };
+const START = defaultTweaks(fire);
 const ALSO: [term: string, detail: string][] = [
   ['Wind direction', 'An arrow on the floor of the box; drag its head to turn the wind.'],
   ['Sound', 'Synthesised from the same numbers: a rumble and roar from the heat, flutter from the vorticity, hiss and crackle from the flow, placed in 3D around the camera.'],

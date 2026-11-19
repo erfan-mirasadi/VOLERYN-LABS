@@ -1,12 +1,12 @@
 import { type ColourModels, packColourModels } from './colour-models';
 import type { DepthMap } from './depth';
 import type { Plate } from './plate';
-import { COMPOSITE, DISPLAY, PRESENT, RENDER, RESOLVE } from './render-shaders';
-import { BOX_MAX, BOX_MIN, DENSITY, EXPOSURE, FIRE_LIGHT, FLOW_PERIOD, GRID, type Preset, type Quality } from './scene';
+import { COMPOSITE, DISPLAY, PRESENT, PREVIEW, RENDER, RESOLVE } from './render-shaders';
+import { BOX_MAX, BOX_MIN, DENSITY, EXPOSURE, FIRE_LIGHT, FLOW_PERIOD, GRID, type Preset, type Quality, type Tweaks } from './scene';
 import type { Volumes } from './simulation';
 import { createSparkRenderer } from './sparks';
 
-const VIEW_FLOATS = 44;
+const VIEW_FLOATS = 48;
 const TARGET_FORMAT: GPUTextureFormat = 'rgba16float';
 // The export marches densely, three quarters of a cell of whatever grid it renders, and sums its samples by
 // blending, so N samples make an exact mean. The step is kept in base cells, like the view's.
@@ -27,6 +27,9 @@ export type Camera = { eye: Vec3; target: Vec3; tanHalfFov: number; shift?: [num
 export type Frame = {
   camera: Camera;
   preset: Preset;
+  tweaks: Tweaks;
+  // World-space origin shift of the simulation window; velocities remain in world space.
+  offset: Vec3;
   blue: number;
   time: number;
   // Counts rendered frames; it drives the per-frame jitter.
@@ -43,6 +46,9 @@ export type Frame = {
 type ViewParams = {
   camera: Camera;
   preset: Preset;
+  tweaks: Tweaks;
+  // World-space origin shift of the simulation window; velocities remain in world space.
+  offset: Vec3;
   blue: number;
   time: number;
   width: number;
@@ -62,6 +68,9 @@ type ViewParams = {
 export type ExportSample = {
   camera: Camera;
   preset: Preset;
+  tweaks: Tweaks;
+  // World-space origin shift of the simulation window; velocities remain in world space.
+  offset: Vec3;
   blue: number;
   time: number;
   // Which scalar volume to read: the current state or the loop blend.
@@ -95,7 +104,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   const raymarch = pipeline(renderModule, 'fs', [{ format: TARGET_FORMAT }]);
   const resolve = fullscreen(RESOLVE, TARGET_FORMAT);
   const present = fullscreen(PRESENT, format);
-  const composite = fullscreen(COMPOSITE, format);
+  const composite = fullscreen(PREVIEW, format);
   // The same bilinear pass into a float target, to carry the history over to a new target size.
   const resample = fullscreen(COMPOSITE, TARGET_FORMAT);
   // The footage behind the fire, read as linear light; one clear texel until a plate is loaded.
@@ -232,7 +241,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   }
 
   const viewData = new Float32Array(VIEW_FLOATS);
-  function writeView({ camera, preset, blue, time, width, height, jitter, frame, stepCells, maxSteps, sampleWeight, frameTime, timeOffset }: ViewParams) {
+  function writeView({ camera, preset, tweaks, offset, blue, time, width, height, jitter, frame, stepCells, maxSteps, sampleWeight, frameTime, timeOffset }: ViewParams) {
     const { forward, right, up } = cameraBasis(camera);
     // Flow A's weight is 0 the moment it resets and 1 when B does; B gets the rest.
     const flowWeight = 1 - Math.abs(1 - 2 * ((time / FLOW_PERIOD) % 1));
@@ -241,13 +250,14 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
       ...forward, width / height,
       ...right, frameTime,
       ...up, stepCells / GRID[0],
-      ...BOX_MIN, EXPOSURE,
-      ...BOX_MAX, DENSITY,
+      ...BOX_MIN.map((value, axis) => value + offset[axis]), EXPOSURE * 2 ** tweaks.exposure,
+      ...BOX_MAX.map((value, axis) => value + offset[axis]), DENSITY * tweaks.smokeDensity,
       ...preset.tint, preset.glow,
       -jitter[0], -jitter[1], width, height,
-      maxSteps, FIRE_LIGHT, frame, preset.fireDensity,
-      preset.detail, flowWeight, sampleWeight, blue,
+      maxSteps, FIRE_LIGHT, frame, preset.fireDensity * tweaks.fireOpacity,
+      preset.detail * tweaks.detail, flowWeight, sampleWeight, blue,
       timeOffset, 0, ...(camera.shift ?? [0, 0]),
+      tweaks.temperature, tweaks.ambient, tweaks.sparkSize, tweaks.keyLight,
     ]);
     device.queue.writeBuffer(viewBuffer, 0, viewData);
   }

@@ -4,8 +4,8 @@ import { SPARK_COUNT, SPARK_DRAW, SPARK_STEP } from './spark-shaders';
 
 // Sparks per second the whole pool trickles at full strength, besides the pops, and how many an explosion throws
 // per unit of blast.
-const SPAWN_RATE = 500;
-const BURST_PER_BLAST = 120;
+const SPAWN_RATE = 280;
+const BURST_PER_BLAST = 55;
 const FLOATS_PER_SPARK = 8;
 const WORKGROUP = 64;
 const ADD: GPUBlendComponent = { srcFactor: 'one', dstFactor: 'one', operation: 'add' };
@@ -15,18 +15,18 @@ type SparkVolumes = { paramSlots: GPUBuffer[]; velocity: GPUTexture; scalars: GP
 // The particles and the compute step that moves and respawns them; one spawn uniform per params slot, like the step's.
 export function createSparkSimulation(device: GPUDevice, { paramSlots, velocity, scalars, sampler }: SparkVolumes) {
   const buffer = device.createBuffer({ size: SPARK_COUNT * FLOATS_PER_SPARK * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-  const spawn = paramSlots.map(() => device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
+  const spawn = paramSlots.map(() => device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
   const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code: SPARK_STEP }), entryPoint: 'main' } });
   const groups = paramSlots.map((params, slot) => scalars.map((sca) => bindResources(device, pipeline, [params, buffer, velocity, sca, sampler, spawn[slot]])));
   // Every spark starts dead: its age past its life.
   const dead = new Float32Array(SPARK_COUNT * FLOATS_PER_SPARK);
   for (let i = 0; i < SPARK_COUNT; i++) dead[i * FLOATS_PER_SPARK + 3] = 1;
-  const spawnData = new Float32Array(4);
+  const spawnData = new Float32Array(8);
 
   return {
     buffer,
-    writeParams(slot: number, strength: number) {
-      spawnData.set([(SPAWN_RATE * strength) / SPARK_COUNT, (BURST_PER_BLAST * strength) / SPARK_COUNT, strength]);
+    writeParams(slot: number, strength: number, size = 1, lifetime = 1) {
+      spawnData.set([(SPAWN_RATE * strength) / SPARK_COUNT, (BURST_PER_BLAST * strength) / SPARK_COUNT, strength, size, lifetime]);
       device.queue.writeBuffer(spawn[slot], 0, spawnData);
     },
     step(pass: GPUComputePassEncoder, slot: number, scalarIndex: number) {
