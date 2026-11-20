@@ -30,6 +30,7 @@ export default function TimingHud() {
     ['steps', `${stats.stepsPerSecond.toFixed(0)} /s`],
     ['divergence', stats.residual.toExponential(1)],
     ['grid', stats.grid.join(' × ')],
+    ['cell density', `${stats.cellsPerUnit.toFixed(1)} / unit`],
     ['sound', typeof stats.sound === 'number' ? `${stats.sound.toFixed(0)} dB` : stats.sound],
   ];
 
@@ -41,6 +42,8 @@ export default function TimingHud() {
           <dd className="text-right tabular-nums text-foreground">{value}</dd>
         </div>
       ))}
+      {stats.domainAdapting && <dt className="col-span-2 text-xs text-ember">Adapting simulation bounds…</dt>}
+      {stats.domainError && <dt role="alert" className="col-span-2 max-w-64 whitespace-normal text-xs leading-relaxed text-ember">{stats.domainError}</dt>}
       <dt className="col-span-2 mt-1 truncate text-[10px]">{stats.adapterName}</dt>
     </dl>
   );

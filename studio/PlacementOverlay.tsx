@@ -17,7 +17,7 @@ const PICK_MARGIN = 0.02;
 // axis snaps back to where it started, with a guide line while it holds. Dragging anywhere else still orbits. While
 // a depth is being picked the whole frame takes the click instead.
 export default function PlacementOverlay() {
-  const { engine, framing, picking, setFraming, setOcclusion, setPicking } = useStudioStore();
+  const { engine, framing, picking, exporting, beginAdjustment, setFraming, setOcclusion, setPicking } = useStudioStore();
   const handle = useRef<HTMLDivElement>(null);
   const drag = useRef<{ id: number; x: number; y: number; from: { x: number; y: number } } | null>(null);
   const [held, setHeld] = useState<{ x: boolean; y: boolean } | null>(null);
@@ -61,18 +61,21 @@ export default function PlacementOverlay() {
       <div
         ref={handle}
         aria-hidden
-        className="absolute cursor-move touch-none"
+        className={`absolute touch-none ${exporting ? 'pointer-events-none' : 'cursor-move'}`}
         onPointerDown={(event) => {
+          if (event.button !== 0 || exporting) return;
+          beginAdjustment(event.pointerId);
           drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY, from: { x: framing.x, y: framing.y } };
           event.currentTarget.setPointerCapture(event.pointerId);
         }}
         onPointerMove={move}
         onPointerUp={release}
         onPointerCancel={release}
+        onLostPointerCapture={release}
       />
       {held?.x && <div aria-hidden className="pointer-events-none absolute inset-y-0 left-1/2 w-px bg-ember/80" />}
       {held?.y && <div aria-hidden className="pointer-events-none absolute inset-x-0 top-1/2 h-px bg-ember/80" />}
-      {picking && (
+      {picking && !exporting && (
         <div
           aria-hidden
           className="absolute inset-0 cursor-crosshair"

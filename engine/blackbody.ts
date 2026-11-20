@@ -60,9 +60,15 @@ fn blackbodyKelvin(kelvin: f32) -> vec3<f32> {
 // preserves referenceKelvin at unit energy and approaches a finite combustion-temperature ceiling smoothly.
 // At the default 1900 K reference: energy 1 -> 1900 K, 2 -> 2231 K, 3 -> 2353 K; ceiling 2424 K.
 // This is a reduced-model calibration, not a chemically resolved adiabatic-temperature calculation.
+// Art-directed colour temperature is decoupled from radiance. Physical thermal energy still controls
+// cooling brightness on the calibrated 1900 K curve. The colour control changes chromaticity at matching
+// luminance; the separate Brightness EV control scales emission. At reference 1900 K this is unchanged.
 fn blackbodyAt(t: f32, referenceKelvin: f32) -> vec3<f32> {
   let thermal = (1.0 - exp(-max(0.0, t))) / 0.6321205588;
-  return blackbodyKelvin(1000.0 + thermal * max(0.0, referenceKelvin - 1000.0));
+  let calibrated = blackbodyKelvin(1000.0 + thermal * 900.0);
+  let colour = blackbodyKelvin(1000.0 + thermal * max(0.0, referenceKelvin - 1000.0));
+  let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
+  return colour * dot(calibrated, luma) / max(dot(colour, luma), 1e-12);
 }
 fn blackbody(t: f32) -> vec3<f32> { return blackbodyAt(t, 1900.0); }
 fn flame(t: f32) -> f32 { return smoothstep(0.15, 0.65, t); }

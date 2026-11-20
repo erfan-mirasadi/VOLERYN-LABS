@@ -5,6 +5,9 @@ export const GRID = [64, 96, 64] as const;
 // the raymarch steps (in base-grid cells) and how the live resolution may scale to hold the target frame rate.
 export type Quality = {
   grid: readonly [number, number, number];
+  // Sampling density is independent of the adaptive domain's dimensions.
+  cellsPerUnit?: number;
+  domainOffset?: readonly [number, number, number];
   lightScale: number;
   stepCells: number;
   maxSteps: number;
@@ -23,7 +26,7 @@ export type QualityId = keyof typeof QUALITIES;
 
 // What every render simulates on: sixty-four times the base cells and about two gigabytes of GPU memory, which
 // only an offline render can afford.
-export type SimulationGrid = Pick<Quality, 'grid' | 'lightScale'>;
+export type SimulationGrid = Pick<Quality, 'grid' | 'lightScale' | 'cellsPerUnit' | 'domainOffset'>;
 export const RENDER_GRID: SimulationGrid = { grid: [256, 384, 256], lightScale: 8 };
 
 // The flame's light volume is blurred to a Gaussian of LIGHT_SIGMA base cells whatever its cell size, so the light
@@ -31,8 +34,8 @@ export const RENDER_GRID: SimulationGrid = { grid: [256, 384, 256], lightScale: 
 // absorbs the light as if it crossed LIGHT_PATH box widths of it, shared out over the passes.
 export const LIGHT_SIGMA = 7.4;
 export const LIGHT_PATH = 0.375;
-export const lightBlurDispatches = ({ grid, lightScale }: SimulationGrid) => {
-  const cell = (lightScale * GRID[0]) / grid[0];
+export const lightBlurDispatches = ({ grid, lightScale, cellsPerUnit = grid[0] }: SimulationGrid) => {
+  const cell = (lightScale * GRID[0]) / cellsPerUnit;
   return Math.max(2, Math.round((LIGHT_SIGMA * LIGHT_SIGMA) / (0.567 * cell * cell)));
 };
 export const FIRE_LIGHT = 12;
@@ -84,6 +87,8 @@ export type Preset = {
   expansion: number;
   tint: [number, number, number];
   glow: number;
+  // Artistic blackbody colour reference at unit thermal energy, independent of emission power.
+  temperature?: number;
   // Extinction of the glowing soot per box width; with glow it gives the flame a body that hides what is behind it.
   fireDensity: number;
   // How far, in cells, the flame's sub-cell noise displaces the lookup; 0 turns it off.
@@ -106,7 +111,7 @@ export type Tweaks = {
   wind: number; windYaw: number; windGust: number; seed: number;
   blue: number; sparks: number; sparkSize: number; sparkLife: number; smoke: number; width: number;
   // Appearance is independent of combustion: temperature is reference Kelvin; exposure is in stops.
-  temperature: number; exposure: number; fireOpacity: number; smokeDensity: number; detail: number; ambient: number;
+  temperature: number; brightness: number; exposure: number; fireOpacity: number; smokeDensity: number; detail: number; ambient: number;
   lightYaw: number; lightElevation: number; keyLight: number;
 };
 
@@ -116,7 +121,7 @@ export function defaultTweaks(preset: Preset): Tweaks {
     vorticity: preset.vorticity, turbulence: 1, disturbance: 1, expansion: 1,
     wind: 0, windYaw: 0, windGust: 0.2, seed: 0,
     blue: preset.blue, sparks: preset.sparks, sparkSize: 1, sparkLife: 1, smoke: 1, width: 1,
-    temperature: 1900, exposure: 0, fireOpacity: 1, smokeDensity: 1, detail: 1, ambient: 1,
+    temperature: preset.temperature ?? 1900, brightness: 0, exposure: 0, fireOpacity: 1, smokeDensity: 1, detail: 1, ambient: 1,
     lightYaw: Math.atan2(LIGHT[2], LIGHT[0]) * 180 / Math.PI, lightElevation: Math.asin(LIGHT[1]) * 180 / Math.PI, keyLight: 1,
   };
 }

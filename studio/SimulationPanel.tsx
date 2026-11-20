@@ -1,9 +1,9 @@
 'use client';
 
-import { useState } from 'react';
-import { QUALITIES, type QualityId } from '@/engine/scene';
+import { defaultTweaks, QUALITIES, type QualityId } from '@/engine/scene';
 import { PRESETS, presetById } from '@/presets/presets';
-import { clampTweak, SLIDERS, type ControlGroup, type Slider } from './controls';
+import { SLIDERS, type ControlGroup, type Slider } from './controls';
+import ParameterControl from './ParameterControl';
 import { type Backdrop, useStudioStore } from './useStudioStore';
 
 const QUALITY_NOTES: Record<QualityId, string> = {
@@ -13,7 +13,7 @@ const QUALITY_NOTES: Record<QualityId, string> = {
   ultra: 'Highest preview detail, for strong GPUs. Restarts the fire.',
 };
 const GROUPS: { id: ControlGroup; label: string; note: string }[] = [
-  { id: 'source', label: 'Source & combustion', note: 'Changes affect newly emitted gas. Replay to compare from ignition.' },
+  { id: 'source', label: 'Source & combustion', note: 'Seed chooses a repeatable source and flow variation. Changing it replays from ignition.' },
   { id: 'motion', label: 'Motion & wind', note: 'Wind moves gas through the scene. Fine controls shape the flow.' },
   { id: 'shading', label: 'Match the shot', note: 'Adjust the rendered look without changing the simulation.' },
   { id: 'sparks', label: 'Sparks', note: 'Incandescent particles with varied size, drag and cooling.' },
@@ -23,37 +23,20 @@ const BACKDROPS: { id: Backdrop; label: string }[] = [{ id: 'checker', label: 'C
 export const chip = (active: boolean) =>
   `rounded-full px-3 py-1 text-sm transition-colors ${active ? 'bg-foreground text-background' : 'text-muted hover:text-foreground'}`;
 
-function NumericValue({ slider, value, set }: { slider: Slider; value: number; set: (value: number) => void }) {
-  // Keep a local edit so entering 0.25 does not clamp its first character mid-keystroke.
-  const [draft, setDraft] = useState<string | null>(null);
-  const commit = () => {
-    const next = draft === null || draft.trim() === '' ? null : clampTweak(slider.key, Number(draft));
-    if (next !== null) set(next);
-    setDraft(null);
-  };
-  return <input
-    type="number" aria-label={`${slider.label} value`} min={slider.min} max={slider.max} step={slider.step}
-    value={draft ?? value} onChange={(event) => setDraft(event.target.value)} onBlur={commit}
-    onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { event.preventDefault(); setDraft(null); } }}
-    className="w-[4.5rem] rounded border border-line bg-background px-1.5 py-1 text-right font-mono text-xs tabular-nums"
-  />;
-}
-
 export default function SimulationPanel() {
   const { engine, presetId, tweaks, backdrop, quality, status, exporting, setPreset, setTweak, resetTweaks, addCube, setBackdrop, setQuality } = useStudioStore();
   const disabled = status !== 'ready' || exporting;
   const preset = presetById(presetId);
-  const row = (slider: Slider) => {
-    const { key, label, min, max, step, help, unit } = slider;
-    return <div key={key} className="flex flex-col gap-1.5" title={help}>
-      <div className="flex items-center justify-between gap-2">
-        <label htmlFor={`control-${key}`}>{label}</label>
-        <div className="flex items-center gap-1"><NumericValue slider={slider} value={tweaks[key]} set={(value) => setTweak(key, value)} /><span className="w-7 text-right text-[10px] text-muted">{unit}</span></div>
-      </div>
-      <input id={`control-${key}`} type="range" min={min} max={max} step={step} value={tweaks[key]} aria-describedby={`help-${key}`} onChange={(event) => setTweak(key, Number(event.target.value))} className="w-full accent-ember" />
-      <span id={`help-${key}`} className="sr-only">{help}</span>
-    </div>;
-  };
+  const defaults = defaultTweaks(preset);
+  const row = ({ key, label, min, max, step, unit, help }: Slider) => (
+    <div key={key} className="flex flex-col gap-2">
+      <ParameterControl showSlider={key !== 'seed'} id={`control-${key}`} label={label} help={help} min={min} max={max} step={step} unit={unit}
+        precision={key === 'seed' || key === 'temperature' ? 0 : key === 'wind' || unit === '°' ? 2 : 3}
+        value={tweaks[key]} defaultValue={defaults[key]} onChange={(value) => setTweak(key, value)} />
+      {key === 'seed' && <button type="button" onClick={() => setTweak('seed', (Math.round(tweaks.seed) + 1) % 1000)} title="Start the simulation with the next seed"
+        className="self-start rounded-full border border-line px-3 py-1 text-xs text-muted hover:text-foreground">Next variation ↗</button>}
+    </div>
+  );
 
   return <div className="flex flex-col gap-6 text-sm">
     <fieldset disabled={disabled} className="flex flex-col gap-3">
@@ -62,8 +45,8 @@ export default function SimulationPanel() {
         {PRESETS.map((item) => <button key={item.id} type="button" onClick={() => setPreset(item.id)} aria-pressed={item.id === presetId} className={chip(item.id === presetId)}>{item.name}</button>)}
       </div>
       <div className="flex flex-wrap gap-2">
-        <button type="button" onClick={() => engine?.restart()} className="rounded-full border border-line px-3 py-1 hover:text-ember">Replay</button>
-        <button type="button" onClick={resetTweaks} className="rounded-full border border-line px-3 py-1 text-muted hover:text-foreground">Reset controls</button>
+        <button type="button" onClick={() => engine?.restart()} title="Replay the simulation from ignition with the current settings" className="rounded-full border border-line px-3 py-1 hover:text-ember">Replay</button>
+        <button type="button" onClick={resetTweaks} title="Restore all simulation settings for this preset" className="rounded-full border border-line px-3 py-1 text-muted hover:text-foreground">Reset controls</button>
         {preset.mode === 'objects' && <button type="button" onClick={addCube} className="rounded-full border border-line px-3 py-1 text-muted hover:text-foreground">Add cube</button>}
       </div>
     </fieldset>
@@ -83,7 +66,7 @@ export default function SimulationPanel() {
     <fieldset disabled={disabled} className="flex flex-col gap-2">
       <legend className="mb-2 text-xs uppercase tracking-wider text-muted">Preview</legend>
       <div className="flex flex-wrap gap-1 self-start rounded-full border border-line p-1">
-        {(Object.keys(QUALITIES) as QualityId[]).map((id) => <button key={id} type="button" onClick={() => setQuality(id)} aria-pressed={id === quality} className={chip(id === quality)}>{id[0].toUpperCase() + id.slice(1)}</button>)}
+        {(Object.keys(QUALITIES) as QualityId[]).map((id) => <button key={id} type="button" title={QUALITY_NOTES[id]} onClick={() => setQuality(id)} aria-pressed={id === quality} className={chip(id === quality)}>{id[0].toUpperCase() + id.slice(1)}</button>)}
       </div>
       <p className="text-xs text-muted">{QUALITY_NOTES[quality]}</p>
     </fieldset>

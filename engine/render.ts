@@ -1,8 +1,8 @@
 import { type ColourModels, packColourModels } from './colour-models';
 import type { DepthMap } from './depth';
 import type { Plate } from './plate';
-import { COMPOSITE, DISPLAY, PRESENT, PREVIEW, RENDER, RESOLVE } from './render-shaders';
-import { BOX_MAX, BOX_MIN, DENSITY, EXPOSURE, FIRE_LIGHT, FLOW_PERIOD, GRID, type Preset, type Quality, type Tweaks } from './scene';
+import { CLEAN_DISPLAY, COMPOSITE, DISPLAY, PRESENT, PREVIEW, RENDER, RESOLVE } from './render-shaders';
+import { BOX_MIN, DENSITY, EXPOSURE, FIRE_LIGHT, FLOW_PERIOD, GRID, type Preset, type Quality, type Tweaks } from './scene';
 import type { Volumes } from './simulation';
 import { createSparkRenderer } from './sparks';
 
@@ -12,8 +12,8 @@ const TARGET_FORMAT: GPUTextureFormat = 'rgba16float';
 // blending, so N samples make an exact mean. The step is kept in base cells, like the view's.
 const EXPORT_STEP_CELLS = 0.75;
 const EXPORT_MAX_STEPS = 320;
-export function exportMarch(grid: readonly number[]) {
-  const k = grid[0] / GRID[0];
+export function exportMarch(grid: readonly number[], cellsPerUnit = grid[0]) {
+  const k = cellsPerUnit / GRID[0];
   return { stepCells: EXPORT_STEP_CELLS / k, maxSteps: EXPORT_MAX_STEPS * k };
 }
 const ADD: GPUBlendComponent = { srcFactor: 'one', dstFactor: 'one', operation: 'add' };
@@ -91,7 +91,9 @@ export type ExportTargets = ReturnType<Renderer['createExportTargets']>;
 export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volumes: Volumes, initialQuality: Quality) {
   // The live raymarch's step and step count; a quality change without a new grid only swaps these.
   let live = { stepCells: initialQuality.stepCells, maxSteps: initialQuality.maxSteps };
-  const offline = exportMarch(initialQuality.grid);
+  const cellsPerUnit = initialQuality.cellsPerUnit ?? initialQuality.grid[0];
+  const span = initialQuality.grid.map((n) => n / cellsPerUnit);
+  const offline = exportMarch(initialQuality.grid, cellsPerUnit);
   const pipeline = (module: GPUShaderModule, entryPoint: string, targets: GPUColorTargetState[]) =>
     device.createRenderPipeline({
       layout: 'auto',
@@ -147,12 +149,12 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   const sparks = createSparkRenderer(device, viewBuffer, volumes, TARGET_FORMAT);
 
   // Export pipelines and bind groups are made on the first export, so the landing page's hero pays nothing for them.
-  let exportPipelines: { march: GPURenderPipeline; display: GPURenderPipeline; groups: GPUBindGroup[] } | null = null;
+  let exportPipelines: { march: GPURenderPipeline; display: GPURenderPipeline; clean: GPURenderPipeline; groups: GPUBindGroup[] } | null = null;
   function exportResources() {
     if (exportPipelines) return exportPipelines;
     const march = pipeline(renderModule, 'fsExport', Array.from({ length: 4 }, () => ({ format: TARGET_FORMAT, blend: { color: ADD, alpha: ADD } })));
     const groups = volumes.scalars.map((_, j) => device.createBindGroup({ layout: march.getBindGroupLayout(0), entries: volumeEntries(j) }));
-    exportPipelines = { march, display: fullscreen(DISPLAY, TARGET_FORMAT), groups };
+    exportPipelines = { march, display: fullscreen(DISPLAY, TARGET_FORMAT), clean: fullscreen(CLEAN_DISPLAY, TARGET_FORMAT), groups };
     return exportPipelines;
   }
 
@@ -251,10 +253,10 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
       ...right, frameTime,
       ...up, stepCells / GRID[0],
       ...BOX_MIN.map((value, axis) => value + offset[axis]), EXPOSURE * 2 ** tweaks.exposure,
-      ...BOX_MAX.map((value, axis) => value + offset[axis]), DENSITY * tweaks.smokeDensity,
-      ...preset.tint, preset.glow,
+      ...BOX_MIN.map((value, axis) => value + offset[axis] + span[axis]), DENSITY * tweaks.smokeDensity,
+      ...preset.tint, preset.glow * 2 ** tweaks.brightness,
       -jitter[0], -jitter[1], width, height,
-      maxSteps, FIRE_LIGHT, frame, preset.fireDensity * tweaks.fireOpacity,
+      Math.max(maxSteps, Math.ceil(Math.hypot(...span) * GRID[0] / stepCells)), FIRE_LIGHT, frame, preset.fireDensity * tweaks.fireOpacity,
       preset.detail * tweaks.detail, flowWeight, sampleWeight, blue,
       timeOffset, 0, ...(camera.shift ?? [0, 0]),
       tweaks.temperature, tweaks.ambient, tweaks.sparkSize, tweaks.keyLight,
@@ -345,17 +347,19 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   // The light groups and the data target, the tonemapped display frame, and the preview's group. The display frame
   // goes over the footage plate when the export composites it, and behind the plate's foreground when it holds the
   // fire out.
-  function createExportTargets(width: number, height: number, { overPlate, holdout }: { overPlate: boolean; holdout: boolean }) {
+  function createExportTargets(width: number, height: number, { overPlate, holdout, clean = false }: { overPlate: boolean; holdout: boolean; clean?: boolean }) {
     const make = () =>
       device.createTexture({ size: [width, height], format: TARGET_FORMAT, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
     const layers = { fire: make(), firelight: make(), smoke: make(), data: make() };
     const display = make();
+    const cleanDisplay = clean ? make() : null;
     const displayLayers = layersBuffer(overPlate ? 1 : 0, 0);
     return {
       width,
       height,
       layers,
       display,
+      cleanDisplay,
       displayLayers,
       overPlate,
       holdout,
@@ -368,6 +372,7 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
       }),
       destroy() {
         for (const texture of [...Object.values(layers), display]) texture.destroy();
+        cleanDisplay?.destroy();
         displayLayers.destroy();
       },
     };
@@ -405,21 +410,32 @@ export function createRenderer(device: GPUDevice, format: GPUTextureFormat, volu
   }
 
   // The group is made for each frame: a video's frames bring depth maps of their own, which may take a new texture.
-  function drawDisplay(encoder: GPUCommandEncoder, { layers, display, displayLayers, overPlate, holdout }: ExportTargets) {
-    const { display: displayPipeline } = exportResources();
-    const group = device.createBindGroup({
-      layout: displayPipeline.getBindGroupLayout(0),
-      entries: [
-        ...[layers.fire, layers.firelight, layers.smoke, overPlate ? plate : noPlate].map((texture, binding) => ({ binding, resource: texture.createView() })),
-        { binding: 4, resource: volumes.sampler },
-        { binding: 5, resource: (holdout ? depth : noDepth).createView() },
-        { binding: 6, resource: { buffer: holdBuffer } },
-        { binding: 7, resource: { buffer: displayLayers } },
-        { binding: 8, resource: (holdout ? colours : noColours).createView() },
-        { binding: 9, resource: { buffer: modelsBuffer } },
-      ],
-    });
-    fullscreenPass(encoder, display.createView(), displayPipeline, group);
+  function drawDisplay(encoder: GPUCommandEncoder, targets: ExportTargets) {
+    const { display: displayPipeline, clean: cleanPipeline } = exportResources();
+    const draw = (target: GPUTexture, layers: GPUBuffer, overPlate: boolean, holdout: boolean) => {
+      const group = device.createBindGroup({
+        layout: displayPipeline.getBindGroupLayout(0),
+        entries: [
+          ...[targets.layers.fire, targets.layers.firelight, targets.layers.smoke, overPlate ? plate : noPlate].map((texture, binding) => ({ binding, resource: texture.createView() })),
+          { binding: 4, resource: volumes.sampler },
+          { binding: 5, resource: (holdout ? depth : noDepth).createView() },
+          { binding: 6, resource: { buffer: holdBuffer } },
+          { binding: 7, resource: { buffer: layers } },
+          { binding: 8, resource: (holdout ? colours : noColours).createView() },
+          { binding: 9, resource: { buffer: modelsBuffer } },
+        ],
+      });
+      fullscreenPass(encoder, target.createView(), displayPipeline, group);
+    };
+    // Both images read the exact same accumulated samples. The clean image is full standalone VFX, with neither
+    // the footage nor its foreground holdout baked into it; only this inexpensive display pass is repeated.
+    if (targets.cleanDisplay) {
+      const group = device.createBindGroup({ layout: cleanPipeline.getBindGroupLayout(0),
+        entries: [targets.layers.fire, targets.layers.firelight, targets.layers.smoke].map((texture, binding) => ({ binding, resource: texture.createView() })),
+      });
+      fullscreenPass(encoder, targets.cleanDisplay.createView(), cleanPipeline, group);
+    }
+    draw(targets.display, targets.displayLayers, targets.overPlate, targets.holdout);
   }
 
   // The finished frame letterboxed on the canvas, so the viewport shows the export as it renders.

@@ -3,21 +3,37 @@
 import { useState } from 'react';
 import type { Framing } from '@/engine/engine';
 import { loadPlate } from '@/engine/plate';
-import { useStudioStore } from './useStudioStore';
+import ParameterControl from './ParameterControl';
+import { CENTRED, DEFAULT_OCCLUSION, useStudioStore } from './useStudioStore';
 
 const FRAMING = [
-  { key: 'x', label: 'Position X', min: -1, max: 1, step: 0.005 },
-  { key: 'y', label: 'Position Y', min: -1, max: 1, step: 0.005 },
-  { key: 'scale', label: 'Scale', min: 0.2, max: 3, step: 0.01 },
-] as const satisfies readonly { key: keyof Framing; label: string; min: number; max: number; step: number }[];
+  { key: 'x', label: 'Position X', min: -1, max: 1, step: 0.005, help: 'Move the effect horizontally in the frame. Positive values move it right.' },
+  { key: 'y', label: 'Position Y', min: -1, max: 1, step: 0.005, help: 'Move the effect vertically in the frame. Positive values move it up.' },
+  { key: 'scale', label: 'Scale', min: 0.2, max: 3, step: 0.01, help: 'Scale the effect in the camera frame. The simulation itself keeps its size.' },
+] as const satisfies readonly { key: keyof Framing; label: string; min: number; max: number; step: number; help: string }[];
 
-const SLIDER_ROW = 'grid grid-cols-[5rem_1fr_3rem] items-center gap-3';
-const VALUE = 'text-right font-mono text-xs tabular-nums text-muted';
+export function PlacementPanel() {
+  const { framing, status, exporting, setFraming } = useStudioStore();
+  return (
+    <details className="border-b border-line pb-3">
+      <summary className="cursor-pointer text-sm" title="Move or scale the effect within the rendered frame">
+        Placement <span className="ml-1 font-mono text-xs tabular-nums text-muted">{framing.scale.toFixed(2)}×</span>
+      </summary>
+      <fieldset disabled={status !== 'ready' || exporting} className="mt-3 flex flex-col gap-3 text-sm" aria-label="Placement controls">
+        {FRAMING.map(({ key, ...control }) => (
+          <ParameterControl key={key} {...control} value={framing[key]} defaultValue={CENTRED[key]}
+            unit={key === 'scale' ? '×' : undefined} onChange={(value) => setFraming({ [key]: value })} />
+        ))}
+      </fieldset>
+    </details>
+  );
+}
+
 const PILL = 'rounded-full border border-line px-3 py-1 text-muted hover:text-foreground aria-pressed:border-ember aria-pressed:text-ember';
 
 // The user's own video or still behind the fire, where the fire sits on it, and how deep into the shot it stands.
 export default function FootagePanel() {
-  const { plate, framing, depthEstimator, occlusion, picking, status, exporting, setPlate, setFraming, setDepthEstimator, setOcclusion, setPicking } = useStudioStore();
+  const { plate, depthEstimator, occlusion, picking, status, exporting, setPlate, setDepthEstimator, setOcclusion, setPicking } = useStudioStore();
   const [error, setError] = useState<string | null>(null);
   // The share of the depth model fetched so far while it is on its way; null otherwise.
   const [fetched, setFetched] = useState<number | null>(null);
@@ -61,13 +77,6 @@ export default function FootagePanel() {
               Remove
             </button>
           </div>
-          {FRAMING.map(({ key, label, min, max, step }) => (
-            <label key={key} className={SLIDER_ROW}>
-              <span>{label}</span>
-              <input type="range" min={min} max={max} step={step} value={framing[key]} onChange={(event) => setFraming({ [key]: Number(event.target.value) })} className="accent-ember" />
-              <span className={VALUE}>{framing[key]}</span>
-            </label>
-          ))}
           <p className="text-xs text-muted">
             {plate.width} × {plate.height}. Drag the fire to place it; near the middle it snaps back. Drag around it to turn it to the shot’s angle.
           </p>
@@ -83,16 +92,12 @@ export default function FootagePanel() {
           )}
           {depthEstimator && fetched === null && (
             <>
-              <label className={SLIDER_ROW}>
-                <span>Depth</span>
-                <input type="range" min={0} max={1} step={0.005} value={occlusion.depth} onChange={(event) => setOcclusion({ depth: Number(event.target.value) })} className="accent-ember" />
-                <span className={VALUE}>{occlusion.depth}</span>
-              </label>
-              <label className={SLIDER_ROW}>
-                <span>Softness</span>
-                <input type="range" min={0} max={1} step={0.01} value={occlusion.softness} onChange={(event) => setOcclusion({ softness: Number(event.target.value) })} className="accent-ember" />
-                <span className={VALUE}>{occlusion.softness}</span>
-              </label>
+              <ParameterControl label="Depth" help="Place the effect behind parts of the footage that are closer to the camera."
+                min={0} max={1} step={0.005} value={occlusion.depth} defaultValue={DEFAULT_OCCLUSION.depth}
+                onChange={(value) => setOcclusion({ depth: value })} />
+              <ParameterControl label="Softness" help="Blend the edges of the foreground mask around the effect."
+                min={0} max={1} step={0.01} value={occlusion.softness} defaultValue={DEFAULT_OCCLUSION.softness}
+                onChange={(value) => setOcclusion({ softness: value })} />
               <div className="flex flex-wrap gap-2">
                 <button type="button" aria-pressed={picking} onClick={() => setPicking(!picking)} className={PILL}>
                   {picking ? 'Click a spot in the shot' : 'Pick depth in the shot'}

@@ -1,4 +1,5 @@
-import { bindResources } from './gpu';
+import { DOMAIN_PROBE, REMAP_VOLUME, type DomainLayout, type DomainProbe } from './domain';
+import { bindResources, computePipeline } from './gpu';
 import { createNoiseTextures, type NoiseTextures } from './noise-textures';
 import { createPressureSolver } from './pressure';
 import { type Box, DENSITY, GRID, LIGHT_PATH, lightBlurDispatches, MAX_BOXES, MODE_INDEX, type Preset, type Quality, type Tweaks } from './scene';
@@ -31,7 +32,8 @@ export type Simulation = ReturnType<typeof createSimulation>;
 export function createSimulation(device: GPUDevice, quality: Quality) {
   const grid = quality.grid;
   // Cells per base-grid cell: preset values in cells are scaled by it, so a finer grid runs the same fire.
-  const k = grid[0] / GRID[0];
+  const cellsPerUnit = quality.cellsPerUnit ?? grid[0];
+  const k = cellsPerUnit / GRID[0];
   const half = (n: number) => Math.ceil(n / 2);
   const flowGrid = grid.map(half) as [number, number, number];
   const shadowGrid = flowGrid;
@@ -77,7 +79,7 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
   const sparks = createSparkSimulation(device, { paramSlots, velocity, scalars, sampler });
 
   const compute = (code: string, constants?: Record<string, number>) =>
-    device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code }), entryPoint: 'main', constants } });
+    computePipeline(device, code, constants);
   const pipelines = Object.fromEntries(Object.entries(SHADERS).map(([name, body]) => [name, compute(HEADER + body)])) as Record<
     keyof typeof SHADERS,
     GPUComputePipeline
@@ -131,17 +133,20 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
   let sc = 0;
   // World displacement of the computational box. Explosions follow ambient horizontal transport,
   // retaining their local detail instead of being sliced away at a stationary side boundary.
-  const offset: [number, number, number] = [0, 0, 0];
+  const offset: [number, number, number] = [...(quality.domainOffset ?? [0, 0, 0])];
+  let lastParams: StepParams | null = null;
   let needsInitialVelocity = true;
   let movingStep = false;
   const paramData = new Float32Array(PARAM_FLOATS);
 
   // Positions, sizes, speeds and accelerations given in base cells become this grid's cells; rates per second,
   // per-cell concentrations and the blast's divergence are the same on any grid.
-  function writeParams(slot: number, { preset, tweaks, boxes, time, dt, emitting, blast }: StepParams) {
+  function writeParams(slot: number, stepParams: StepParams, advanceOrigin = true) {
+    lastParams = stepParams;
+    const { preset, tweaks, boxes, time, dt, emitting, blast } = stepParams;
     const boxData = Array.from({ length: MAX_BOXES }, (_, i) => {
       const box = boxes[i];
-      return box ? [box.x * k, box.y * k, box.z * k, box.yaw, box.hx * k, box.hy * k, box.hz * k, 1] : [0, 0, 0, 0, 0, 0, 0, 0];
+      return box ? [box.x * k - offset[0] * cellsPerUnit, box.y * k - offset[1] * cellsPerUnit, box.z * k - offset[2] * cellsPerUnit, box.yaw, box.hx * k, box.hy * k, box.hz * k, 1] : [0, 0, 0, 0, 0, 0, 0, 0];
     }).flat();
     // A spatially uniform, slowly varying far-field velocity stays divergence-free; the pressure solve
     // deflects it around solids. Gust is amplitude, not a new random impulse on every frame.
@@ -150,7 +155,7 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
     const windVector: [number, number, number] = [wind * Math.cos((tweaks.windYaw * Math.PI) / 180), 0, wind * Math.sin((tweaks.windYaw * Math.PI) / 180)];
     movingStep = preset.mode === 'explosion';
     const transport: [number, number, number] = movingStep ? windVector : [0, 0, 0];
-    for (let axis = 0; axis < 3; axis++) offset[axis] += transport[axis] * dt / grid[0];
+    if (advanceOrigin) for (let axis = 0; axis < 3; axis++) offset[axis] += transport[axis] * dt / cellsPerUnit;
     const lightYaw = tweaks.lightYaw * Math.PI / 180;
     const lightElevation = tweaks.lightElevation * Math.PI / 180;
     const lightDirection = [Math.cos(lightYaw) * Math.cos(lightElevation), Math.sin(lightElevation), Math.sin(lightYaw) * Math.cos(lightElevation)];
@@ -159,14 +164,15 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
       time, preset.buoyancy * tweaks.buoyancy * k, preset.cooling * tweaks.cooling, tweaks.vorticity * k,
       ...windVector, preset.burn * tweaks.burnRate,
       // The charge and its brief blast stay anchored in world space as the box follows the plume.
-      ...preset.emitter.map((c, axis) => c * k - offset[axis] * grid[0]), preset.radius * k,
+      ...preset.emitter.map((c, axis) => c * k - offset[axis] * cellsPerUnit), preset.radius * k,
       emitting ? preset.emit * tweaks.fuel : 0, preset.smokeYield * tweaks.smoke, preset.heat * tweaks.heat, preset.dissipation,
       ...lightDirection, MODE_INDEX[preset.mode],
       preset.turbulence * tweaks.turbulence * k, preset.damping, preset.expansion * tweaks.expansion, blast * tweaks.expansion,
       preset.ignite, tweaks.seed, tweaks.width, tweaks.disturbance,
       ...boxData,
-      tweaks.temperature, tweaks.smokeDensity, tweaks.fireOpacity, 0,
-      ...transport, 0,
+      tweaks.temperature, tweaks.smokeDensity, tweaks.fireOpacity, 1,
+      ...transport, cellsPerUnit,
+      ...offset.map((n) => n * cellsPerUnit), 0,
     ]);
     device.queue.writeBuffer(paramSlots[slot], 0, paramData);
     sparks.writeParams(slot, tweaks.sparks, tweaks.sparkSize, tweaks.sparkLife);
@@ -269,7 +275,7 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
   }
 
   function clear() {
-    offset.fill(0);
+    offset.splice(0, 3, ...(quality.domainOffset ?? [0, 0, 0]));
     needsInitialVelocity = true;
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
@@ -279,6 +285,53 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
     sparks.clear();
   }
 
+
+  let probing = false;
+  const probePipeline = compute(DOMAIN_PROBE);
+  const probeBuffer = device.createBuffer({ size: 40, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+  const probeReadback = device.createBuffer({ size: 40, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const probeGroups = scalars.map((scalar) => bind(probePipeline, [scalar, velocity, probeBuffer]));
+  async function probeDomain(): Promise<DomainProbe | null> {
+    if (probing || !lastParams) return null;
+    probing = true;
+    try {
+      device.queue.writeBuffer(probeBuffer, 0, new Uint32Array([...grid, 0, 0, 0, 0, 0, 0, 0]));
+      const encoder = device.createCommandEncoder(); const pass = encoder.beginComputePass();
+      run(pass, probePipeline, probeGroups[sc]); pass.end();
+      encoder.copyBufferToBuffer(probeBuffer, 0, probeReadback, 0, 40); device.queue.submit([encoder.finish()]);
+      await probeReadback.mapAsync(GPUMapMode.READ);
+      const ints = new Uint32Array(probeReadback.getMappedRange()).slice(); probeReadback.unmap();
+      const speeds = new Float32Array(ints.buffer);
+      return { min: [ints[0], ints[1], ints[2]], max: [ints[3], ints[4], ints[5]], speed: [speeds[6] / cellsPerUnit, speeds[7] / cellsPerUnit, speeds[8] / cellsPerUnit], occupied: ints[9] };
+    } finally { probing = false; }
+  }
+
+  async function copyStateFrom(previous: Simulation) {
+    const params = previous.lastParams;
+    if (!params) { clear(); return; }
+    clear();
+    writeParams(0, { ...params, dt: 0 }, false);
+    const remap = compute(REMAP_VOLUME);
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    run(pass, pipelines.initializeVelocity, groups[0].initializeVelocity);
+    const uniforms: GPUBuffer[] = [];
+    const transfer = (source: GPUTexture, target: GPUTexture, kind: number, size: [number, number, number]) => {
+      const uniform = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); uniforms.push(uniform);
+      const wind = [paramData[8], paramData[9], paramData[10]];
+      device.queue.writeBuffer(uniform, 0, new Float32Array([...previous.offset, previous.cellsPerUnit, ...offset, cellsPerUnit, ...previous.grid, kind, ...grid, 0, ...wind, 0]));
+      run(pass, remap, bind(remap, [uniform, source, target, sampler]), size.map((n) => Math.ceil(n / 4)) as [number, number, number]);
+    };
+    transfer(previous.volumes.velocity, velocity, 1, [...grid]);
+    transfer(previous.volumes.scalars[previous.scalarIndex], scalars[0], 0, [...grid]);
+    for (let i = 0; i < 2; i++) transfer(previous.volumes.flows[previous.scalarIndex][i], flows[0][i], 2, flowGrid);
+    pass.end(); device.queue.submit([encoder.finish()]);
+    sparks.remapFrom(previous.volumes.sparks, previous.cellsPerUnit, cellsPerUnit, previous.offset, offset);
+    await device.queue.onSubmittedWorkDone();
+    for (const uniform of uniforms) uniform.destroy();
+    sc = 0; needsInitialVelocity = false;
+  }
+
   function dispose() {
     releaseKept();
     for (const texture of [velocity, advected, forced, scratch, ...scalars, ...flows.flat(), curl, divergence, shadow, ...light, thickness]) texture.destroy();
@@ -286,9 +339,9 @@ export function createSimulation(device: GPUDevice, quality: Quality) {
     noise.curl.destroy();
     pressure.dispose();
     sparks.dispose();
-    for (const buffer of [...paramSlots, blend, staging]) buffer.destroy();
+    for (const buffer of [...paramSlots, blend, staging, probeBuffer, probeReadback]) buffer.destroy();
   }
 
   const volumes: Volumes = { scalars, flows, velocity, shadow, light: light[0], params: paramSlots[0], sampler, noise, sparks: sparks.buffer };
-  return { grid, volumes, writeParams, step, updateLighting, keepFrame, blendLoop, releaseKept, readResidual, clear, dispose, get scalarIndex() { return sc; }, get offset(): [number, number, number] { return [...offset]; } };
+  return { grid, cellsPerUnit, volumes, copyStateFrom, probeDomain, get lastParams() { return lastParams; }, get layout(): DomainLayout { return { grid: [...grid], cellsPerUnit, offset: [...offset] }; }, writeParams, step, updateLighting, keepFrame, blendLoop, releaseKept, readResidual, clear, dispose, get scalarIndex() { return sc; }, get offset(): [number, number, number] { return [...offset]; } };
 }

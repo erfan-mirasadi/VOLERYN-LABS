@@ -1,4 +1,4 @@
-import { bindResources } from './gpu';
+import { bindResources, computePipeline } from './gpu';
 import { COARSEN, MASK, PROLONGATE, RESTRICT, SMOOTH } from './pressure-shaders';
 
 const CYCLES = 2;
@@ -21,7 +21,7 @@ export function createPressureSolver(device: GPUDevice, params: GPUBuffer, diver
   const levels = sizes.map((size, l) => ({ size, pressure: volume(size), rhs: l === 0 ? divergence : volume(size), solid: volume(size) }));
 
   const compute = (code: string, constants?: Record<string, number>) =>
-    device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code }), entryPoint: 'main', constants } });
+    computePipeline(device, code, constants);
   const smooth = [0, 1].map((parity) => compute(SMOOTH, { parity }));
   const restrict = compute(RESTRICT);
   const prolongate = compute(PROLONGATE);

@@ -5,7 +5,7 @@ import { extname, join } from 'node:path';
 
 const root = new URL('../out', import.meta.url).pathname;
 const port = Number(process.argv[2] ?? 3451);
-const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.png': 'image/png', '.woff2': 'font/woff2', '.wasm': 'application/wasm', '.mjs': 'text/javascript' };
+const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.png': 'image/png', '.jpg': 'image/jpeg', '.avif': 'image/avif', '.mp4': 'video/mp4', '.woff2': 'font/woff2', '.wasm': 'application/wasm', '.mjs': 'text/javascript' };
 
 createServer(async (request, response) => {
   const path = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);

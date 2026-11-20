@@ -1,7 +1,8 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { presetById } from '@/presets/presets';
+import { useEffect } from 'react';
+import { PRESETS, presetById } from '@/presets/presets';
 import PlacementOverlay from './PlacementOverlay';
 import PlateTransport from './PlateTransport';
 import TimingHud from './TimingHud';
@@ -27,14 +28,19 @@ const STATUS_MESSAGE = {
 export default function Viewport() {
   const { backdrop, plate, status, presetId, sound, setEngine, toggleSound } = useStudioStore();
   const message = STATUS_MESSAGE[status];
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get('preset');
+    const state = useStudioStore.getState();
+    if (requested && requested !== state.presetId && PRESETS.some((item) => item.id === requested)) state.setPreset(requested, false);
+  }, []);
   // With footage loaded the canvas is the footage's frame, as large as fits; otherwise it fills the viewport.
   const frame = plate && { aspectRatio: `${plate.width} / ${plate.height}`, width: `min(100cqw, 100cqh * ${plate.width / plate.height})` };
 
   return (
-    <div className={`relative grid min-h-[60vh] flex-1 place-items-center overflow-hidden [container-type:size] ${BACKDROP_CLASS[backdrop]}`}>
+    <div className={`relative grid min-h-0 min-w-0 flex-[1_1_54%] place-items-center overflow-hidden [container-type:size] lg:flex-1 ${BACKDROP_CLASS[backdrop]}`}>
       <div className={`relative ${frame ? '' : 'size-full'}`} style={frame ?? undefined}>
         <FireCanvas preset={presetById(presetId)} onEngine={setEngine} label="Fire simulation; drag to orbit" />
-        {status === 'ready' && plate && <PlacementOverlay />}
+        {status === 'ready' && <PlacementOverlay />}
         {status === 'ready' && <WindGizmo />}
         {status === 'ready' && plate?.source instanceof HTMLVideoElement && <PlateTransport video={plate.source} />}
       </div>

@@ -1,26 +1,26 @@
 import type { Destination } from './files';
 
 // A master's worth of bits: 16 Mb/s at 1080p30, scaled with the pixels and the frame rate and capped where H.264 stops.
-const bitrateFor = (width: number, height: number, fps: number) => Math.min(100e6, Math.round((16e6 * width * height * Math.max(fps, 30)) / (1920 * 1080 * 30)));
+export const videoBitrateFor = (width: number, height: number, fps: number) => Math.min(100e6, Math.round((16e6 * width * height * Math.max(fps, 30)) / (1920 * 1080 * 30)));
 
 // H.264 in an MP4 through WebCodecs and mediabunny, which is loaded here on the first video export only, so the
 // studio never pays for it otherwise. Frames stream into the picked folder; the zip path collects them in memory.
 export async function createMp4Sink(destination: Destination, file: string, width: number, height: number, fps: number) {
   const { Output, Mp4OutputFormat, StreamTarget, BufferTarget, VideoSampleSource, VideoSample, canEncodeVideo } = await import('mediabunny');
-  const bitrate = bitrateFor(width, height, fps);
-  if (!(await canEncodeVideo('avc', { width, height, bitrate }))) throw new Error('This browser cannot encode H.264 at this size.');
+  const bitrate = videoBitrateFor(width, height, fps);
+  if (!(await canEncodeVideo('avc', { width, height, bitrate, frameRate: fps, latencyMode: 'quality' }))) throw new Error('This browser cannot encode H.264 at this size.');
   const stream = await destination.openStream?.(file);
   const target = stream ? new StreamTarget(stream, { chunked: true }) : new BufferTarget();
   const output = new Output({ format: new Mp4OutputFormat({ fastStart: stream ? false : 'in-memory' }), target });
-  const source = new VideoSampleSource({ codec: 'avc', bitrate, keyFrameInterval: 2 });
+  const source = new VideoSampleSource({ codec: 'avc', bitrate, keyFrameInterval: 2, latencyMode: 'quality' });
   output.addVideoTrack(source, { frameRate: fps });
   await output.start();
   const colorSpace = { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false } as const;
   return {
     async frame(rgba: Uint8Array, index: number) {
       const sample = new VideoSample(toI420(rgba, width, height), { format: 'I420', codedWidth: width, codedHeight: height, timestamp: index / fps, duration: 1 / fps, colorSpace });
-      await source.add(sample);
-      sample.close();
+      try { await source.add(sample); }
+      finally { sample.close(); }
     },
     async finish() {
       await output.finalize();
@@ -32,7 +32,7 @@ export async function createMp4Sink(destination: Destination, file: string, widt
 
 // BT.709 limited-range 4:2:0 done here rather than by the encoder, so every player reads the file the same way.
 // Chroma is the mean of each 2x2 block, so flame edges do not alias; every size offered is even.
-function toI420(rgba: Uint8Array, width: number, height: number) {
+export function toI420(rgba: Uint8Array, width: number, height: number) {
   const luma = width * height;
   const out = new Uint8Array(luma + luma / 2);
   const chroma = luma / 4;

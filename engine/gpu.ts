@@ -36,3 +36,18 @@ export function bindResources(device: GPUDevice, pipeline: GPUComputePipeline, r
     })),
   });
 }
+
+
+// Regridding changes resources and bind groups, not shader programs. Reuse programs on the same device.
+const computePrograms = new WeakMap<GPUDevice, Map<string, GPUComputePipeline>>();
+export function computePipeline(device: GPUDevice, code: string, constants?: Record<string, number>) {
+  let cache = computePrograms.get(device);
+  if (!cache) { cache = new Map(); computePrograms.set(device, cache); }
+  const key = code + '\0' + JSON.stringify(Object.entries(constants ?? {}).sort(([a], [b]) => a.localeCompare(b)));
+  let pipeline = cache.get(key);
+  if (!pipeline) {
+    pipeline = device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code }), entryPoint: 'main', constants } });
+    cache.set(key, pipeline);
+  }
+  return pipeline;
+}

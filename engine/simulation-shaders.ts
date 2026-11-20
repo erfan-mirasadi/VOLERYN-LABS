@@ -33,7 +33,9 @@ struct Params {
   appearance: vec4<f32>,
   // Moving-window velocity in current-grid cells/s. Velocity textures retain absolute world velocity.
   transport: vec3<f32>,
-  transportPad: f32,
+  cellsPerUnit: f32,
+  originCells: vec3<f32>,
+  originPad: f32,
 }
 `;
 
@@ -57,7 +59,7 @@ fn solidDistance(p: vec3<f32>) -> f32 {
 }
 fn isSolid(p: vec3<f32>) -> bool { return P.mode == 3.0 && solidDistance(p) < 0.0; }
 // Cells per base-grid cell: lengths, speeds and noise periods written in base cells are scaled by it.
-fn cellScale() -> f32 { return P.size.x / 64.0; }
+fn cellScale() -> f32 { return P.cellsPerUnit / 64.0; }
 `;
 
 export const HEADER = PARAMS_STRUCT + /* wgsl */ `
@@ -87,7 +89,19 @@ fn noise3(p: vec3<f32>) -> f32 {
 fn sourceShape(p: vec3<f32>) -> vec4<f32> {
   let local = (p - P.emitter) / max(P.radius * vec3<f32>(P.width, 1.0, P.width), vec3<f32>(0.01));
   let baseDistance = length(local);
-  if (P.mode != 2.0 || baseDistance > 1.6) { return vec4<f32>(baseDistance, 1.0, 1.0, 0.0); }
+  if (baseDistance > 1.6 || P.mode == 3.0) { return vec4<f32>(baseDistance, 1.0, 1.0, 0.0); }
+  if (P.mode != 2.0) {
+    // A seed chooses a coherent arrangement of source hot spots, not just the phase of flicker.
+    let angle = 6.2831853 * fract(P.seed * 0.618034);
+    let rotated = vec3<f32>(cos(angle) * local.x + sin(angle) * local.z, local.y, cos(angle) * local.z - sin(angle) * local.x);
+    let spread = 0.3 + 0.28 * fract(P.seed * 0.374761);
+    let a = rotated - vec3<f32>(spread, 0.0, 0.18);
+    let b = rotated - vec3<f32>(-0.36, 0.15, -spread);
+    let c = rotated - vec3<f32>(0.05, -0.15, -0.35);
+    let spots = exp(-7.0 * dot(a, a)) + 0.85 * exp(-9.0 * dot(b, b)) + 0.65 * exp(-11.0 * dot(c, c));
+    let contour = 0.8 + 0.35 * noise3(local * 2.2 + seedShift() * 0.11);
+    return vec4<f32>(baseDistance / contour, 0.12 + 1.8 * min(spots, 1.4), 1.0, 0.0);
+  }
   let offset = seedShift() * 0.13;
   let broad = noise3(local * 2.1 + offset);
   let fine = noise3(local * 5.3 + offset + vec3<f32>(7.1));
@@ -269,7 +283,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let burnout = select(0.0, SOOT_BURNOUT * smoothstep(0.5, 0.8, q.y), P.burn > 0.0);
   q.x = (q.x + burned * P.smokeYield) * exp(-(burnout + P.dissipation) * P.dt);
   let k = cellScale();
-  let flicker = noise3(p * 0.3 / k + vec3<f32>(0.0, -P.time * 4.0, P.time * 1.3) + seedShift());
+  let flicker = noise3((p + P.originCells) * 0.3 / k + vec3<f32>(0.0, -P.time * 4.0, P.time * 1.3) + seedShift());
   if (P.mode == 3.0) {
     // Solids give off fuel from a thin skin around them, so the flames take their shape.
     let sd = solidDistance(p);
@@ -278,7 +292,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     } else if (sd < 2.5 * k) {
       // Upper faces burn, undersides smoulder, and hot spots wander slowly along the log.
       let up = solidDistance(p + vec3<f32>(0.0, 0.75 * k, 0.0)) - solidDistance(p - vec3<f32>(0.0, 0.75 * k, 0.0));
-      let spot = noise3(p * 0.5 / k + vec3<f32>(0.0, P.time * 0.3, 0.0));
+      let spot = noise3((p + P.originCells) * 0.5 / k + vec3<f32>(0.0, P.time * 0.3, 0.0) + seedShift());
       let skin = (0.25 + 0.75 * smoothstep(-0.5, 1.0, up)) * (0.4 + 0.6 * spot);
       let amount = (1.0 - sd / (2.5 * k)) * (0.35 + 1.3 * flicker) * P.emit * P.dt * skin;
       q.z += amount;
@@ -289,7 +303,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let d = shape.x;
     if (d < 1.0 && P.emit > 0.0) {
       var amount = (1.0 - d * d) * (0.35 + 1.3 * flicker) * P.emit * P.dt;
-      if (P.mode == 2.0) { amount *= shape.y; }
+      amount *= shape.y;
       if (P.mode == 1.0) {
         q.x += amount * 0.8;
         q.y += amount * 0.5;
@@ -309,8 +323,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       }
     }
   }
-  // A time-based sponge under the lid hides the approximate open top consistently across substeps.
-  q *= exp(-9.75 * P.dt * smoothstep(0.8, 1.0, p.y / P.size.y));
+  // Adaptive bounds keep occupied gas away from the approximate open boundary; no material sponge
+  // erases the upper plume before its domain has a chance to grow.
   textureStore(dst, c, max(q, vec4<f32>(0.0)));
 }`,
   advectFlow: /* wgsl */ `
@@ -331,7 +345,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (any(c >= vec3<i32>(textureDimensions(dstA)))) { return; }
   let p = 2.0 * vec3<f32>(c) + vec3<f32>(0.5);
   let back = trace(p, P.dt);
-  let shift = back - p;
+  let shift = back - p - P.transport * P.dt;
   let a = textureSampleLevel(srcA, lin, coord(back), 0.0).xyz + shift;
   let b = textureSampleLevel(srcB, lin, coord(back), 0.0).xyz + shift;
   textureStore(dstA, c, vec4<f32>(select(a, vec3<f32>(0.0), resets(0.0)), 0.0));
@@ -391,9 +405,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   // A second octave, a third the size and rising faster, lives where the gas is hot and fuel is burning: the small
   // movement that keeps a flame's tongues alive without shaking the whole plume.
   let rise = vec3<f32>(0.0, -12.0 * k * P.time, 0.0) + k * seedShift();
-  let stirring = textureSampleLevel(stir, rep, (p + rise) / (24.0 * k), 0.0).xyz;
+  let stirring = textureSampleLevel(stir, rep, (p + P.originCells + rise) / ((18.0 + 15.0 * fract(P.seed * 0.317)) * k), 0.0).xyz;
   let rise2 = vec3<f32>(0.0, -27.0 * k * P.time, 0.0) + 2.0 * k * seedShift();
-  let fine = textureSampleLevel(stir, rep, (p + rise2) / (9.0 * k), 0.0).xyz;
+  let fine = textureSampleLevel(stir, rep, (p + P.originCells + rise2) / (9.0 * k), 0.0).xyz;
   // Coarse churning and fine breakup have independent controls. Disturbance lives near the thermal
   // front and weak smoke cap, so adding edge detail need not shake the entire fireball.
   let heatGradient = 0.5 * vec3<f32>(textureLoad(sca, clampc(c + X), 0).y - textureLoad(sca, clampc(c - X), 0).y, textureLoad(sca, clampc(c + Y), 0).y - textureLoad(sca, clampc(c - Y), 0).y, textureLoad(sca, clampc(c + Z), 0).y - textureLoad(sca, clampc(c - Z), 0).y) / k;
@@ -424,7 +438,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   // Drag is relative to the ambient wind, rather than to a stationary box. The prescribed side
   // flux and Neumann pressure boundaries keep a constant wind from being projected away.
   v = P.wind + (v - P.wind) * exp(-P.damping * P.dt);
-  v.y *= exp(-3.7 * P.dt * smoothstep(0.8, 1.0, p.y / P.size.y));
   if (c.x == 0) { v.x = P.wind.x; }
   if (c.z == 0) { v.z = P.wind.z; }
   textureStore(dst, c, vec4<f32>(select(v, vec3<f32>(0.0), blocked(c)), 0.0));
@@ -483,12 +496,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let n = textureDimensions(dst);
   if (any(id >= n)) { return; }
-  let box = vec3<f32>(1.0, P.size.y / P.size.x, P.size.z / P.size.x);
+  let box = P.size / P.cellsPerUnit;
   let march = P.lightDir * 0.03 / box;
   let start = (vec3<f32>(id) + vec3<f32>(0.5)) / vec3<f32>(n);
   var q = start;
   var depth = 0.0;
-  for (var i = 0; i < 64; i++) {
+  for (var i = 0; i < 256; i++) {
     q += march;
     if (any(q < vec3<f32>(0.0)) || any(q > vec3<f32>(1.0))) { break; }
     depth += textureSampleLevel(sca, lin, q, 0.0).x;
@@ -496,7 +509,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   // A second march straight up: how much of the sky each cell still sees.
   var up = start;
   var depthUp = 0.0;
-  for (var i = 0; i < 64; i++) {
+  for (var i = 0; i < 256; i++) {
     up.y += 0.03 / box.y;
     if (up.y > 1.0) { break; }
     depthUp += textureSampleLevel(sca, lin, up, 0.0).x;
@@ -525,7 +538,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var y = 0; y < ${scale}; y++) {
       for (var x = 0; x < ${scale}; x++) {
         let s = textureLoad(sca, base + vec3<i32>(x, y, z), 0);
-        sum += blackbodyAt(s.y, P.appearance.x) * flame(s.y) * min(s.x * 0.35 + s.w * 0.015, 2.0) * P.appearance.z * ${FIRE_RADIANCE.toFixed(3)};
+        sum += blackbodyAt(s.y, P.appearance.x) * flame(s.y) * min(s.x * 0.35 + s.w * 0.015, 2.0) * P.appearance.z * P.appearance.w * ${FIRE_RADIANCE.toFixed(3)};
         smoke += s.x;
         occupancy = max(occupancy, max(s.x, s.y));
       }

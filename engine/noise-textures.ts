@@ -7,6 +7,21 @@ const WEIGHTS = [1, 0.5, 0.25];
 export type NoiseTextures = ReturnType<typeof createNoiseTextures>;
 
 export function createNoiseTextures(device: GPUDevice) {
+  const { noise, curl } = bakedTextures ??= bakeTextures();
+  const upload = (format: GPUTextureFormat, data: Uint8Array<ArrayBuffer> | Int8Array<ArrayBuffer>) => {
+    const texture = device.createTexture({ size: [SIZE, SIZE, SIZE], dimension: '3d', format, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    device.queue.writeTexture({ texture }, data, { bytesPerRow: SIZE * 4, rowsPerImage: SIZE }, [SIZE, SIZE, SIZE]);
+    return texture;
+  };
+  return {
+    values: upload('rgba8unorm', noise),
+    curl: upload('rgba8snorm', curl),
+    repeat: device.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat', addressModeW: 'repeat' }),
+  };
+}
+
+let bakedTextures: ReturnType<typeof bakeTextures> | undefined;
+function bakeTextures() {
   const channels = [0, 1, 2, 3].map(bakeChannel);
   const noise = new Uint8Array(SIZE ** 3 * 4);
   const curl = new Int8Array(SIZE ** 3 * 4);
@@ -32,16 +47,7 @@ export function createNoiseTextures(device: GPUDevice) {
   }
   for (let i = 0; i < SIZE ** 3; i++) for (let k = 0; k < 3; k++) curl[4 * i + k] = Math.round((127 * curlFloat[3 * i + k]) / peak);
 
-  const upload = (format: GPUTextureFormat, data: Uint8Array<ArrayBuffer> | Int8Array<ArrayBuffer>) => {
-    const texture = device.createTexture({ size: [SIZE, SIZE, SIZE], dimension: '3d', format, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    device.queue.writeTexture({ texture }, data, { bytesPerRow: SIZE * 4, rowsPerImage: SIZE }, [SIZE, SIZE, SIZE]);
-    return texture;
-  };
-  return {
-    values: upload('rgba8unorm', noise),
-    curl: upload('rgba8snorm', curl),
-    repeat: device.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat', addressModeW: 'repeat' }),
-  };
+  return { noise, curl };
 }
 
 // Three octaves of value noise on lattices that divide the texture, so every octave tiles; normalized to [0, 1].

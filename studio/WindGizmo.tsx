@@ -8,7 +8,7 @@ const LENGTH = 0.32;
 
 // An arrow on the floor of the simulation box showing where the wind blows; drag its head to turn it.
 export default function WindGizmo() {
-  const { engine, setTweak } = useStudioStore();
+  const { engine, exporting, beginAdjustment, setTweak } = useStudioStore();
   const line = useRef<SVGLineElement>(null);
   const head = useRef<SVGGElement>(null);
   const dragging = useRef<number | null>(null);
@@ -37,7 +37,7 @@ export default function WindGizmo() {
   }, [engine]);
 
   const turn = (event: React.PointerEvent<SVGGElement>) => {
-    if (!engine) return;
+    if (!engine || exporting) return;
     const rect = event.currentTarget.ownerSVGElement!.getBoundingClientRect();
     const floor = engine.floorPoint(event.clientX - rect.left, event.clientY - rect.top);
     if (!floor) return;
@@ -54,12 +54,15 @@ export default function WindGizmo() {
         ref={head}
         className="pointer-events-auto cursor-grab active:cursor-grabbing"
         onPointerDown={(event) => {
+          if (event.button !== 0 || exporting) return;
+          beginAdjustment(event.pointerId);
           dragging.current = event.pointerId;
           event.currentTarget.setPointerCapture(event.pointerId);
         }}
         onPointerMove={(event) => dragging.current === event.pointerId && turn(event)}
-        onPointerUp={() => (dragging.current = null)}
+        onLostPointerCapture={() => (dragging.current = null)}
       >
+        <title>Drag to change wind direction</title>
         <circle r={14} fill="var(--color-background)" fillOpacity={0.8} stroke="currentColor" strokeWidth={1.5} />
         <path d="M-5 -6 L7 0 L-5 6 Z" fill="currentColor" />
       </g>

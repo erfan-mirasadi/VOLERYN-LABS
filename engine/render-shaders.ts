@@ -176,7 +176,7 @@ fn velocityAt(q: vec3<f32>) -> vec3<f32> {
   return vec3<f32>(
     textureSampleLevel(vel, lin, q + vec3<f32>(h.x, 0.0, 0.0), 0.0).x,
     textureSampleLevel(vel, lin, q + vec3<f32>(0.0, h.y, 0.0), 0.0).y,
-    textureSampleLevel(vel, lin, q + vec3<f32>(0.0, 0.0, h.z), 0.0).z) / P.size.x;
+    textureSampleLevel(vel, lin, q + vec3<f32>(0.0, 0.0, h.z), 0.0).z) / P.cellsPerUnit;
 }
 
 // The light groups add up to the beauty: fire is everything that glows, firelight the flame's light on smoke and
@@ -265,7 +265,7 @@ fn march(frag: vec2<f32>) -> March {
     let blocks = vec3<i32>(textureDimensions(glow));
     let skip = 2.0 * P.size.x / f32(blocks.x) - 0.5;
     if (textureLoad(glow, min(vec3<i32>(q * vec3<f32>(blocks)), blocks - 1), 0).a < 0.02 && sd > skip) {
-      t += skip / P.size.x;
+      t += skip / P.cellsPerUnit;
       continue;
     }
     let lightHere = textureSampleLevel(glow, lin, q, 0.0);
@@ -276,7 +276,7 @@ fn march(frag: vec2<f32>) -> March {
       // two independently advected coordinates blend by value so a flow-field reset never swims through the gas.
       // A broad octave folds the volume; smaller octaves fray it. Smoke participates even after it stops glowing.
       let k = cellScale();
-      let gb = g / k;
+      let gb = (g + P.originCells) / k;
       let dA = textureSampleLevel(flowA, lin, q, 0.0).xyz / k;
       let dB = textureSampleLevel(flowB, lin, q, 0.0).xyz / k;
       let stretch = vec3<f32>(1.0, 0.65, 1.0) / NOISE_PERIOD;
@@ -410,6 +410,20 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let uv = frag.xy / vec2<f32>(textureDimensions(fire));
   let behind = textureSampleLevel(plate, lin, uv, 0.0);
   return over(frame, vec4<f32>(behind.rgb, behind.a * L.plate), coverAt(uv, behind.rgb));
+}`;
+
+// The standalone image reads the same accumulated samples without any footage/depth/colour-model work.
+export const CLEAN_DISPLAY = TONEMAP + /* wgsl */ `
+@group(0) @binding(0) var fire: texture_2d<f32>;
+@group(0) @binding(1) var firelight: texture_2d<f32>;
+@group(0) @binding(2) var smoke: texture_2d<f32>;
+` + FULLSCREEN_VS + /* wgsl */ `
+@fragment
+fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let p = vec2<i32>(frag.xy);
+  let f = textureLoad(fire, p, 0);
+  let frame = vec4<f32>(tonemap(f.rgb + textureLoad(firelight, p, 0).rgb + textureLoad(smoke, p, 0).rgb), f.a);
+  return over(frame, vec4<f32>(0.0), 0.0);
 }`;
 
 // Temporal blend in scene-linear radiance, with history clamped to the current neighbourhood to limit ghosting.

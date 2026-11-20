@@ -12,11 +12,11 @@ export const SLIDERS: readonly Slider[] = [
   { key: 'fuel', label: 'Fuel amount', min: 0.1, max: 2.5, step: 0.01, group: 'source', unit: '×', help: 'Fuel fed into the source. More fuel gives a richer, smokier burn.' },
   { key: 'width', label: 'Source width', min: 0.5, max: 2.5, step: 0.05, group: 'source', unit: '×', help: 'Horizontal extent of the source, before the gas expands.' },
   { key: 'smoke', label: 'Soot yield', min: 0, max: 2.5, step: 0.01, group: 'source', unit: '×', help: 'Smoke produced by combustion. Use Smoke density below to adjust its rendered opacity.' },
-  { key: 'seed', label: 'Seed', min: 0, max: 999, step: 1, group: 'source', help: 'Deterministic source variation. Replay to compare the same seed from ignition.' },
+  { key: 'seed', label: 'Seed', min: 0, max: 999, step: 1, group: 'source', help: 'A repeatable variation of the source hotspots and turbulent flow. Changing Seed restarts the simulation; the same seed and settings reproduce the same result.' },
   { key: 'burnRate', label: 'Burn rate', min: 0.2, max: 3, step: 0.01, group: 'source', unit: '×', advanced: true, help: 'How quickly fuel reacts after ignition. Lower values prolong burning.' },
   { key: 'cooling', label: 'Cooling', min: 0.2, max: 3, step: 0.01, group: 'source', unit: '×', advanced: true, help: 'Rate of heat loss. Higher values shorten the incandescent phase.' },
   { key: 'blue', label: 'Blue base', min: 0, max: 1, step: 0.01, group: 'source', advanced: true, help: 'Blue contribution around fresh fuel. Usually leave at zero for a sooty explosion.' },
-  { key: 'wind', label: 'Wind speed', min: -60, max: 60, step: 1, group: 'motion', unit: 'cell/s', help: 'Ambient flow in base grid cells per second; 64 cells span the box. Negative values reverse the direction.' },
+  { key: 'wind', label: 'Wind speed', min: -60, max: 60, step: 1, group: 'motion', unit: 'cell/s', help: 'Ambient flow in base grid cells per second; 64 base cells span one world unit. Negative values reverse the direction.' },
   { key: 'windYaw', label: 'Direction', min: 0, max: 359, step: 1, group: 'motion', unit: '°', help: 'Wind heading around the floor, also adjustable by dragging the arrow in the view.' },
   { key: 'windGust', label: 'Gusts', min: 0, max: 1, step: 0.01, group: 'motion', help: 'Smooth variation of wind speed. Zero gives steady wind.' },
   { key: 'buoyancy', label: 'Lift', min: 0, max: 2.5, step: 0.01, group: 'motion', unit: '×', advanced: true, help: 'Upward acceleration from hot gas, independent of how brightly it renders.' },
@@ -25,7 +25,8 @@ export const SLIDERS: readonly Slider[] = [
   { key: 'disturbance', label: 'Fine breakup', min: 0, max: 3, step: 0.01, group: 'motion', unit: '×', advanced: true, help: 'Small-scale motion concentrated around hot, occupied gas.' },
   { key: 'expansion', label: 'Expansion', min: 0.2, max: 2, step: 0.01, group: 'motion', unit: '×', advanced: true, help: 'Expansion from burning gas and the initial blast.', explosion: true },
   { key: 'exposure', label: 'Exposure', min: -5, max: 5, step: 0.05, group: 'shading', unit: 'EV', help: 'Fire and smoke exposure, in stops. The footage itself is unchanged.' },
-  { key: 'temperature', label: 'Temperature', min: 1000, max: 3000, step: 10, group: 'shading', unit: 'K', help: 'Reference blackbody temperature for the incandescent soot. Hotter values are whiter and brighter; use Exposure to balance the shot.' },
+  { key: 'brightness', label: 'Brightness', min: -5, max: 5, step: 0.05, group: 'shading', unit: 'EV', help: 'Fire emission only. One stop doubles its light without changing the simulated heat or smoke illumination.' },
+  { key: 'temperature', label: 'Flame color', min: 1000, max: 3000, step: 10, group: 'shading', unit: 'K', help: 'Blackbody color temperature: lower is redder, higher is yellow to white. Color is luminance-balanced; use Brightness to change emitted light, and Heat release to change the simulation.' },
   { key: 'smokeDensity', label: 'Smoke density', min: 0, max: 3, step: 0.01, group: 'shading', unit: '×', help: 'Rendered smoke extinction. Independent of the amount of smoke simulated.' },
   { key: 'fireOpacity', label: 'Flame body', min: 0, max: 3, step: 0.01, group: 'shading', unit: '×', advanced: true, help: 'Extinction of incandescent soot. Lower values reveal more of the background.' },
   { key: 'detail', label: 'Flow detail', min: 0, max: 3, step: 0.01, group: 'shading', unit: '×', advanced: true, help: 'Flow-carried volume detail. Zero shows only the simulated grid.' },
@@ -37,10 +38,3 @@ export const SLIDERS: readonly Slider[] = [
   { key: 'sparkSize', label: 'Size', min: 0.25, max: 3, step: 0.05, group: 'sparks', unit: '×', advanced: true, help: 'Physical particle size. Smaller embers cool sooner and follow the gas more closely.' },
   { key: 'sparkLife', label: 'Lifetime', min: 0.25, max: 3, step: 0.05, group: 'sparks', unit: '×', advanced: true, help: 'Cooling lifetime of particles. Export trails follow the selected camera shutter.' },
 ];
-
-export function clampTweak(key: keyof Tweaks, value: number) {
-  const slider = SLIDERS.find((item) => item.key === key);
-  if (!slider || !Number.isFinite(value)) return null;
-  const bounded = Math.min(slider.max, Math.max(slider.min, value));
-  return Number((Math.round(bounded / slider.step) * slider.step).toFixed(4));
-}

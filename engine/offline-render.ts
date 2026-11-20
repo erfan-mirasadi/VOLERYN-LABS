@@ -12,7 +12,7 @@ const PROBE_ALPHA = new Uint16Array(new Float16Array([0.01]).buffer)[0];
 // One staging slot above this size is enough: two would hold a quarter gigabyte for a 4K EXR.
 const SINGLE_SLOT_BYTES = 128 * 2 ** 20;
 
-export type Plane = 'display' | 'fire' | 'firelight' | 'smoke' | 'data';
+export type Plane = 'display' | 'clean' | 'fire' | 'firelight' | 'smoke' | 'data';
 export type Fps = 24 | 25 | 30 | 60;
 
 export type OfflineJob = {
@@ -47,6 +47,19 @@ export type RenderedFrame = {
   planes: Partial<Record<Plane, Uint16Array>>;
 };
 
+// Progress counts completed GPU work within the current phase. Setup has no known total; an ETA is emitted
+// only after completed work has supplied a timing sample. The export layer adds encoding and saving phases.
+export type OfflineProgress = {
+  phase: 'setup' | 'warmup' | 'loop' | 'render';
+  completed: number;
+  total: number;
+  elapsedMs: number;
+  etaMs?: number;
+  simulatedSeconds?: number;
+};
+
+export type OfflineWork = { simulationSteps: number; volumeSamples: number; displayImages: number };
+
 export type OfflineContext = {
   device: GPUDevice;
   context: GPUCanvasContext;
@@ -60,6 +73,11 @@ export type OfflineContext = {
   step: (dt: number) => number;
   // Puts the footage plate, and its depth, on the frame for a clip time, when the job uses either.
   showPlate?: (seconds: number) => Promise<void>;
+  onProgress?: (progress: OfflineProgress) => void;
+  onWork?: (work: OfflineWork) => void;
+  // A look-ahead requests a conservative envelope for the whole loop before any kept frames are captured.
+  // Context simulation/renderer may be getters: an adaptive resize replaces both between steps.
+  adaptDomain?: (lookAheadSeconds?: number) => Promise<void>;
 };
 
 export function halton(index: number, base: number) {
@@ -109,6 +127,20 @@ export function fitCamera(eye: Vec3, fovDegrees = 20, margin = 0.92, travel: Vec
   return { eye: centre.map((c, i) => c - forward[i] * distance) as Vec3, target: centre, tanHalfFov: t };
 }
 
+// Fit an observed world envelope using the user's existing view direction. Adaptive fields may extend beyond
+// the initial box, so their world-space bounds are also needed when the low-resolution image probe misses them.
+export function fitBoundsCamera(camera: Camera, bounds: { min: Vec3; max: Vec3 }, fovDegrees = 20, margin = 0.92): Camera {
+  const centre = bounds.min.map((low, axis) => (low + bounds.max[axis]) / 2) as Vec3;
+  const { forward, right, up } = cameraBasis(camera);
+  const tanHalfFov = Math.tan(fovDegrees * Math.PI / 360);
+  let distance = 0.01;
+  for (const x of [bounds.min[0], bounds.max[0]]) for (const y of [bounds.min[1], bounds.max[1]]) for (const z of [bounds.min[2], bounds.max[2]]) {
+    const rel: Vec3 = [x - centre[0], y - centre[1], z - centre[2]];
+    distance = Math.max(distance, Math.max(Math.abs(dot(rel, right)), Math.abs(dot(rel, up))) / (margin * tanHalfFov) - dot(rel, forward));
+  }
+  return { eye: centre.map((value, axis) => value - forward[axis] * distance) as Vec3, target: centre, tanHalfFov };
+}
+
 // Narrows a fitted lens onto what the clip actually shows: a small draft of the same job finds the alpha extents over
 // every frame, then the eye stays put while the view turns to their centre and zooms to them with the margin.
 export async function fitToContent(render: (job: OfflineJob, onFrame: (frame: RenderedFrame) => Promise<void>) => Promise<void>, job: OfflineJob, margin = 0.92): Promise<Camera> {
@@ -156,43 +188,123 @@ export async function fitToContent(render: (job: OfflineJob, onFrame: (frame: Re
 // the same samples, so the same job gives the same bytes. Frames are read back through a ring of staging buffers
 // while the GPU renders the next one; onFrame sees each frame in order and may hold it until it returns.
 export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFrame: (frame: RenderedFrame) => Promise<void>, signal: AbortSignal) {
-  const { device, simulation, renderer } = ctx;
+  const { device } = ctx;
   const substeps = substepsFor(job.fps);
   const dt = 1 / (job.fps * substeps);
   let time = 0;
-  const warmupSteps = Math.round(job.warmup / dt);
-  for (let n = 1; n <= warmupSteps; n++) {
-    time = ctx.step(dt);
-    // Every few steps the queue drains, so a cancel lands within seconds even when a film-grid step takes a while.
-    if (n % 8 === 0) {
-      await device.queue.onSubmittedWorkDone();
+  const work: OfflineWork = { simulationSteps: 0, volumeSamples: 0, displayImages: 0 };
+  let stepBatch = 1;
+  let stepsSinceProbe = 0;
+  const pause = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const progress = (phase: OfflineProgress['phase'], completed: number, total: number, started: number, simulatedSeconds?: number) => {
+    const elapsedMs = performance.now() - started;
+    ctx.onProgress?.({ phase, completed, total, elapsedMs,
+      ...(completed >= 2 && completed < total && { etaMs: elapsedMs / completed * (total - completed) }),
+      ...(simulatedSeconds !== undefined && { simulatedSeconds }),
+    });
+  };
+  // Keep the queue short enough to accept a cancel and repaint. These are the same fixed solver steps as before;
+  // only their submission batches change. A measured slow step reduces the next batch to one.
+  const advance = async (count: number, adapt: boolean, completed?: (done: number) => void) => {
+    let queued = 0;
+    let batchStarted = performance.now();
+    for (let n = 1; n <= count; n++) {
       signal.throwIfAborted();
+      time = ctx.step(dt);
+      work.simulationSteps++;
+      queued++;
+      stepsSinceProbe++;
+      // Probe timing is part of the physical replay. Never let the performance-tuned queue batch move a
+      // resize from step four to step five on a faster/slower run.
+      if (queued >= stepBatch || n === count || (adapt && ctx.adaptDomain && stepsSinceProbe >= 4)) {
+        await device.queue.onSubmittedWorkDone();
+        const msPerStep = (performance.now() - batchStarted) / queued;
+        stepBatch = Math.max(1, Math.min(4, Math.floor(250 / Math.max(1, msPerStep))));
+        signal.throwIfAborted();
+        if (adapt && ctx.adaptDomain && stepsSinceProbe >= 4) {
+          await ctx.adaptDomain();
+          stepsSinceProbe = 0;
+          signal.throwIfAborted();
+        }
+        completed?.(n);
+        await pause();
+        signal.throwIfAborted();
+        queued = 0;
+        batchStarted = performance.now();
+      }
     }
+  };
+  const warmupSteps = Math.round(job.warmup / dt);
+  if (warmupSteps > 0) {
+    const started = performance.now();
+    progress('warmup', 0, warmupSteps, started, 0);
+    await pause();
+    await advance(warmupSteps, true, (done) => progress('warmup', done, warmupSteps, started, done * dt));
   }
-  const overlap = job.loop ? loopOverlap(job.frames, simulation.grid) : 0;
+  signal.throwIfAborted();
+  if (ctx.adaptDomain) {
+    // Kept loop fields must share one geometry. Reserve their full envelope now, then keep it fixed until the
+    // loop is finished; ordinary clips can continue expanding between frames.
+    await ctx.adaptDomain(job.loop ? (job.frames + MAX_OVERLAP) * job.stride / job.fps : undefined);
+    stepsSinceProbe = 0;
+    signal.throwIfAborted();
+  }
+  const overlap = job.loop ? loopOverlap(job.frames, ctx.simulation.grid) : 0;
   const bytesPerRow = Math.ceil((8 * job.width) / 256) * 256;
   const planeBytes = bytesPerRow * job.height;
   const slotBytes = job.read.length * planeBytes;
   const slots = slotBytes > SINGLE_SLOT_BYTES ? 1 : 2;
+  let targetRenderer = ctx.renderer;
+  let targets: ReturnType<Renderer['createExportTargets']> | undefined;
+  const createTargets = async () => {
+    device.pushErrorScope('out-of-memory');
+    const next = ctx.renderer.createExportTargets(job.width, job.height, { overPlate: Boolean(job.plate), holdout: Boolean(job.holdout), clean: job.read.includes('clean') });
+    if (await device.popErrorScope()) {
+      next.destroy();
+      throw new Error('Not enough GPU memory for this size; try 1920 × 1080.');
+    }
+    targets?.destroy();
+    targets = next;
+    targetRenderer = ctx.renderer;
+  };
+  const setupStarted = performance.now();
+  progress('setup', 0, 0, setupStarted);
+  await pause();
+  await createTargets();
   device.pushErrorScope('out-of-memory');
-  const targets = renderer.createExportTargets(job.width, job.height, { overPlate: Boolean(job.plate), holdout: Boolean(job.holdout) });
   const staging = Array.from({ length: slots }, () => device.createBuffer({ size: slotBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
   if (await device.popErrorScope()) {
-    targets.destroy();
+    targets?.destroy();
     for (const buffer of staging) buffer.destroy();
     throw new Error('Not enough GPU memory for this size; try 1920 × 1080.');
   }
   const busy = staging.map(() => Promise.resolve());
   let previous = Promise.resolve();
+  let renderingStarted = performance.now();
+  const loopStarted = performance.now();
+  if (overlap) progress('loop', 0, overlap, loopStarted);
+  else progress('render', 0, job.frames, renderingStarted);
+  let sampleBatch = 1;
   try {
     for (let i = 0; i < job.frames + overlap; i++) {
       signal.throwIfAborted();
-      for (let s = 0; s < substeps * job.stride; s++) time = ctx.step(dt);
+      await advance(substeps * job.stride, !job.loop);
+      const simulation = ctx.simulation;
       if (i < overlap) {
         simulation.keepFrame(i);
+        await device.queue.onSubmittedWorkDone();
+        progress('loop', i + 1, overlap, loopStarted);
+        await pause();
         continue;
       }
       const j = i - overlap;
+      if (j === 0 && overlap) {
+        renderingStarted = performance.now();
+        progress('render', 0, job.frames, renderingStarted);
+      }
+      if (ctx.renderer !== targetRenderer) await createTargets();
+      const renderer = ctx.renderer;
+      const frameTargets = targets!;
       let source = simulation.scalarIndex;
       // There is no kept set of sparks to blend toward, so they fade out over the loop's tail and in over its head.
       let sparks = j < overlap ? smooth((j + 1) / overlap) : 1;
@@ -207,52 +319,63 @@ export async function renderOffline(ctx: OfflineContext, job: OfflineJob, onFram
       simulation.updateLighting(pass, source);
       pass.end();
       device.queue.submit([lighting.finish()]);
-      // The samples spread over the shutter, centred on the frame, as well as over the pixel.
+      // A few temporal samples at a time bound cancellation latency even for a 4K frame. Progress follows GPU
+      // completion, rather than counting commands merely queued on the CPU.
       const frameTime = job.stride / job.fps;
+      let queued = 0;
+      let sampleStarted = performance.now();
       for (let s = 0; s < job.samples; s++) {
-        renderer.drawExportSample(targets, {
-          camera: job.camera,
-          preset: ctx.preset,
-          blue: ctx.blue,
-          tweaks: ctx.tweaks,
-          offset: simulation.offset,
-          time,
-          source,
-          jitter: filterOffset(s),
-          frame: j * job.samples + s,
-          weight: 1 / job.samples,
-          frameTime,
-          timeOffset: job.shutter * frameTime * (halton(s + 1, 5) - 0.5),
-          first: s === 0,
-          sparks,
+        signal.throwIfAborted();
+        renderer.drawExportSample(frameTargets, {
+          camera: job.camera, preset: ctx.preset, blue: ctx.blue, tweaks: ctx.tweaks, offset: simulation.offset,
+          time, source, jitter: filterOffset(s), frame: j * job.samples + s, weight: 1 / job.samples,
+          frameTime, timeOffset: job.shutter * frameTime * (halton(s + 1, 5) - 0.5), first: s === 0, sparks,
         });
+        work.volumeSamples++;
+        queued++;
+        if (queued >= sampleBatch || s + 1 === job.samples) {
+          await device.queue.onSubmittedWorkDone();
+          const msPerSample = (performance.now() - sampleStarted) / queued;
+          sampleBatch = Math.max(1, Math.min(4, Math.floor(250 / Math.max(1, msPerSample))));
+          signal.throwIfAborted();
+          progress('render', j + (s + 1) / job.samples, job.frames, renderingStarted);
+          await pause();
+          signal.throwIfAborted();
+          queued = 0;
+          sampleStarted = performance.now();
+        }
       }
       const slot = j % slots;
       await busy[slot];
+      signal.throwIfAborted();
       await ctx.showPlate?.((j * job.stride) / job.fps);
+      signal.throwIfAborted();
       const buffer = staging[slot];
       const encoder = device.createCommandEncoder();
-      renderer.drawDisplay(encoder, targets);
-      renderer.drawPreview(encoder, ctx.context.getCurrentTexture().createView(), [ctx.canvas.width, ctx.canvas.height], targets);
+      renderer.drawDisplay(encoder, frameTargets);
+      work.displayImages += frameTargets.cleanDisplay ? 2 : 1;
+      renderer.drawPreview(encoder, ctx.context.getCurrentTexture().createView(), [ctx.canvas.width, ctx.canvas.height], frameTargets);
       job.read.forEach((plane, p) => {
-        const texture = plane === 'display' ? targets.display : targets.layers[plane];
+        const texture = plane === 'display' ? frameTargets.display : plane === 'clean' ? frameTargets.cleanDisplay! : frameTargets.layers[plane];
         encoder.copyTextureToBuffer({ texture }, { buffer, offset: p * planeBytes, bytesPerRow, rowsPerImage: job.height }, [job.width, job.height]);
       });
       device.queue.submit([encoder.finish()]);
       // Promise.all keeps the map handled when an earlier frame's sink failed and the finally destroys the buffer.
       previous = busy[slot] = Promise.all([previous, buffer.mapAsync(GPUMapMode.READ)]).then(async () => {
+        signal.throwIfAborted();
         const planes: RenderedFrame['planes'] = {};
         job.read.forEach((plane, p) => (planes[plane] = new Uint16Array(buffer.getMappedRange(p * planeBytes, planeBytes))));
-        await onFrame({ index: j, width: job.width, height: job.height, stride: bytesPerRow / 2, planes });
-        buffer.unmap();
+        try { await onFrame({ index: j, width: job.width, height: job.height, stride: bytesPerRow / 2, planes }); }
+        finally { buffer.unmap(); }
       });
     }
     await previous;
   } finally {
     await previous.catch(() => {});
     for (const buffer of staging) buffer.destroy();
-    targets.destroy();
-    simulation.releaseKept();
+    targets?.destroy();
+    ctx.simulation.releaseKept();
+    ctx.onWork?.({ ...work });
   }
 }
 
